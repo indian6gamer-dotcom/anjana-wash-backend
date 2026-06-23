@@ -13,8 +13,13 @@ from datetime import datetime, timezone, timedelta
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-from backend.sqlite_db import SQLiteDB
-db = SQLiteDB(str(ROOT_DIR / 'anjana_clean.db'))
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if DATABASE_URL:
+    from backend.postgres_db import PostgresDB
+    db = PostgresDB(DATABASE_URL)
+else:
+    from backend.sqlite_db import SQLiteDB
+    db = SQLiteDB(str(ROOT_DIR / 'anjana_clean.db'))
 client = db
 
 app = FastAPI(title="Anjana Wash API")
