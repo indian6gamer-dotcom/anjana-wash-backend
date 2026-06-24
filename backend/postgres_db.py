@@ -272,6 +272,27 @@ class bookings_collection:
     async def update_many(self, filter, update):
         pass
 
+    async def delete_one(self, filter):
+        conn = self._connect()
+        cursor = conn.cursor()
+        
+        where_clauses = []
+        where_params = []
+        for k, v in filter.items():
+            where_clauses.append(f"{k} = %s")
+            where_params.append(v)
+            
+        query = f"DELETE FROM bookings WHERE {' AND '.join(where_clauses)}"
+        cursor.execute(query, where_params)
+        deleted_count = cursor.rowcount
+        conn.commit()
+        conn.close()
+        
+        class DeleteResult:
+            def __init__(self, count):
+                self.deleted_count = count
+        return DeleteResult(deleted_count)
+
 class config_collection:
     def __init__(self, db_url):
         self.db_url = db_url

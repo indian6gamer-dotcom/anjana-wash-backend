@@ -4,6 +4,10 @@ from starlette.middleware.cors import CORSMiddleware
 
 import os
 import logging
+import io
+import zipfile
+import csv
+import base64
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -552,6 +556,121 @@ async def today_stats():
         "online_amount": sum(b["price"] for b in online),
         "total_earnings": sum(b["price"] for b in paid),
     }
+
+
+class ClearRequest(BaseModel):
+    owner_pin: str
+
+
+@api_router.get("/bookings/archive/status")
+async def archive_status():
+    cursor = db.bookings.find()
+    all_b = await cursor.to_list(50000)
+    
+    cutoff_dt = datetime.now(timezone.utc) + IST_OFFSET - timedelta(days=15)
+    cutoff_str = cutoff_dt.isoformat()
+    
+    old_b = [b for b in all_b if b["created_at"] < cutoff_str]
+    return {
+        "total_bookings": len(all_b),
+        "old_bookings": len(old_b),
+        "cutoff_date": cutoff_str
+    }
+
+
+@api_router.get("/bookings/archive/download")
+async def download_archive(owner_pin: str, all: bool = False):
+    await verify_owner_pin_or_raise(owner_pin)
+    
+    cursor = db.bookings.find()
+    all_b = await cursor.to_list(50000)
+    
+    if not all:
+        cutoff_dt = datetime.now(timezone.utc) + IST_OFFSET - timedelta(days=15)
+        cutoff_str = cutoff_dt.isoformat()
+        bookings_to_archive = [b for b in all_b if b["created_at"] < cutoff_str]
+    else:
+        bookings_to_archive = all_b
+        
+    if not bookings_to_archive:
+        raise HTTPException(status_code=400, detail="No bookings found to archive")
+        
+    from fastapi.responses import StreamingResponse
+    zip_io = io.BytesIO()
+    with zipfile.ZipFile(zip_io, "w", zipfile.ZIP_DEFLATED) as archive:
+        csv_io = io.StringIO()
+        writer = csv.writer(csv_io)
+        writer.writerow([
+            "ID", "Token", "Customer Name", "Phone", "Vehicle Number", 
+            "Category", "Service Name", "Price", "Payment Method", 
+            "Payment Provider", "Payment Status", "Status", "Created At", "Completed At"
+        ])
+        
+        for b in bookings_to_archive:
+            writer.writerow([
+                b.get("id"),
+                b.get("token"),
+                b.get("customer_name"),
+                b.get("phone"),
+                b.get("vehicle_number"),
+                b.get("category_label"),
+                b.get("service_name"),
+                b.get("price"),
+                b.get("payment_method"),
+                b.get("payment_provider"),
+                b.get("payment_status"),
+                b.get("status"),
+                b.get("created_at"),
+                b.get("completed_at")
+            ])
+            
+            for photo_type in ["vehicle_photo", "worker_photo"]:
+                photo_data = b.get(photo_type)
+                if photo_data and "base64," in photo_data:
+                    try:
+                        header, base64_str = photo_data.split("base64,", 1)
+                        ext = "jpg"
+                        if "image/png" in header:
+                            ext = "png"
+                        elif "image/webp" in header:
+                            ext = "webp"
+                        image_bytes = base64.b64decode(base64_str)
+                        filename = f"photos/{b.get('token')}_{b.get('id')[:8]}_{photo_type}.{ext}"
+                        archive.writestr(filename, image_bytes)
+                    except Exception as e:
+                        logger.error(f"Error writing image to zip: {str(e)}")
+                        
+        archive.writestr("bookings.csv", csv_io.getvalue())
+        
+    zip_io.seek(0)
+    date_str = (datetime.now(timezone.utc) + IST_OFFSET).strftime("%Y%m%d_%H%M%S")
+    filename = f"anjana_wash_archive_{date_str}.zip"
+    
+    return StreamingResponse(
+        zip_io,
+        media_type="application/x-zip-compressed",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+@api_router.post("/bookings/archive/clear")
+async def clear_archive(payload: ClearRequest):
+    await verify_owner_pin_or_raise(payload.owner_pin)
+    
+    cursor = db.bookings.find()
+    all_b = await cursor.to_list(50000)
+    
+    cutoff_dt = datetime.now(timezone.utc) + IST_OFFSET - timedelta(days=15)
+    cutoff_str = cutoff_dt.isoformat()
+    
+    old_bookings = [b for b in all_b if b["created_at"] < cutoff_str]
+    
+    deleted_count = 0
+    for b in old_bookings:
+        res = await db.bookings.delete_one({"id": b["id"]})
+        deleted_count += res.deleted_count
+        
+    return {"success": True, "deleted_count": deleted_count}
 
 
 # ---------- PIN ----------
