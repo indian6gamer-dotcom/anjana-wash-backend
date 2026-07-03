@@ -273,10 +273,15 @@ class PaymentInitiateRequest(BaseModel):
 
 
 # ---------- Helpers ----------
+SERVICES_CACHE = {}
+
 async def get_service_doc(service_id: str):
+    if service_id in SERVICES_CACHE:
+        return SERVICES_CACHE[service_id]
     doc = await db.services.find_one({"id": service_id, "active": True}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=400, detail="Invalid or inactive service")
+    SERVICES_CACHE[service_id] = doc
     return doc
 
 
@@ -401,6 +406,7 @@ async def owner_create_service(payload: ServiceCreate):
         active=True,
     )
     await db.services.insert_one(svc.model_dump())
+    SERVICES_CACHE.clear()
     return svc
 
 
@@ -421,6 +427,7 @@ async def owner_update_service(service_id: str, payload: ServiceUpdate):
         update["active"] = payload.active
     if update:
         await db.services.update_one({"id": service_id}, {"$set": update})
+        SERVICES_CACHE.clear()
     doc = await db.services.find_one({"id": service_id}, {"_id": 0})
     return doc
 
@@ -431,6 +438,7 @@ async def owner_delete_service(service_id: str, payload: ServiceDelete):
     res = await db.services.delete_one({"id": service_id})
     if res.deleted_count == 0:
         raise HTTPException(404, "Service not found")
+    SERVICES_CACHE.clear()
     return {"success": True}
 
 
