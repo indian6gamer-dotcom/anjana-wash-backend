@@ -19,10 +19,16 @@ load_dotenv(ROOT_DIR / '.env')
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if DATABASE_URL:
-    from backend.postgres_db import PostgresDB
+    try:
+        from backend.postgres_db import PostgresDB
+    except ModuleNotFoundError:
+        from postgres_db import PostgresDB
     db = PostgresDB(DATABASE_URL)
 else:
-    from backend.sqlite_db import SQLiteDB
+    try:
+        from backend.sqlite_db import SQLiteDB
+    except ModuleNotFoundError:
+        from sqlite_db import SQLiteDB
     db = SQLiteDB(str(ROOT_DIR / 'anjana_clean.db'))
 client = db
 
@@ -220,6 +226,7 @@ class BookingCreate(BaseModel):
     payment_method: str  # "cash" or "online"
     payment_provider: Optional[str] = None  # "phonepe" | "gpay" when online
     worker_photo: Optional[str] = None
+    booking_source: Optional[str] = "walkin"
 
 
 class Booking(BaseModel):
@@ -243,6 +250,7 @@ class Booking(BaseModel):
     worker_photo: Optional[str] = None
     created_at: str
     completed_at: Optional[str] = None
+    booking_source: Optional[str] = "walkin"
 
 
 class CompleteBookingRequest(BaseModel):
@@ -344,7 +352,24 @@ async def services_by_category(category_id: str):
     if category_id not in LEAF_BY_ID:
         raise HTTPException(400, "Invalid category")
     cursor = db.services.find({"category_id": category_id, "active": True}, {"_id": 0}).sort("price", 1)
-    return await cursor.to_list(100)
+    results = await cursor.to_list(100)
+    
+    if not results and category_id in DEFAULT_SERVICE_PRICES:
+        import random
+        for name, price, desc in DEFAULT_SERVICE_PRICES[category_id]:
+            svc_id = f"{category_id}_{name.lower().replace(' ', '_')}_{random.randint(100, 999)}"
+            await db.services.insert_one({
+                "id": svc_id,
+                "category_id": category_id,
+                "name": name,
+                "price": price,
+                "description": desc,
+                "active": True
+            })
+        cursor = db.services.find({"category_id": category_id, "active": True}, {"_id": 0}).sort("price", 1)
+        results = await cursor.to_list(100)
+        
+    return results
 
 
 @api_router.get("/owner/services", response_model=List[Service])
@@ -448,6 +473,7 @@ async def create_booking(payload: BookingCreate):
         status="queued",
         worker_photo=payload.worker_photo,
         created_at=now_ist_iso(),
+        booking_source=payload.booking_source or "walkin"
     )
     doc = booking.model_dump()
     await db.bookings.insert_one(doc)
