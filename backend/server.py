@@ -507,11 +507,11 @@ async def queue():
         cursor_pending = db.bookings.find(
             {
                 "payment_method": "online",
-                "payment_status": "pending",
-                "created_at": {"$gte": fifteen_mins_ago}
+                "payment_status": "pending"
             }
         )
-        pending_list = await cursor_pending.to_list(100)
+        all_pending = await cursor_pending.to_list(100)
+        pending_list = [b for b in all_pending if b.get("created_at", "") >= fifteen_mins_ago]
         
         for b in pending_list:
             booking_id = b["id"]
