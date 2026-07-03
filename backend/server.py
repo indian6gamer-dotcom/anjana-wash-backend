@@ -347,6 +347,12 @@ async def list_categories():
     return CATEGORIES
 
 
+@api_router.get("/services", response_model=List[Service])
+async def list_services():
+    cursor = db.services.find({"active": True}, {"_id": 0}).sort("price", 1)
+    return await cursor.to_list(500)
+
+
 @api_router.get("/services/by-category/{category_id}", response_model=List[Service])
 async def services_by_category(category_id: str):
     if category_id not in LEAF_BY_ID:
@@ -482,7 +488,50 @@ async def create_booking(payload: BookingCreate):
 
 @api_router.get("/bookings/queue", response_model=List[Booking])
 async def queue():
-    # only queued bookings where online is paid, or cash (which is allowed in queue)
+    # Automatically verify/sync any pending online bookings created in the last 15 minutes
+    # This ensures that even if a customer closes their tab or loses internet during payment,
+    # the server will detect it and add it to the worker queue within 12 seconds.
+    from datetime import datetime, timedelta
+    now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    fifteen_mins_ago = (now_ist - timedelta(minutes=15)).isoformat()
+    
+    try:
+        cursor_pending = db.bookings.find(
+            {
+                "payment_method": "online",
+                "payment_status": "pending",
+                "created_at": {"$gte": fifteen_mins_ago}
+            }
+        )
+        pending_list = await cursor_pending.to_list(100)
+        
+        for b in pending_list:
+            booking_id = b["id"]
+            client_id = os.environ.get("PHONEPE_CLIENT_ID")
+            client_secret = os.environ.get("PHONEPE_CLIENT_SECRET")
+            if client_id and client_secret:
+                try:
+                    token = _get_oauth_token()
+                    env = os.environ.get("PHONEPE_ENV", "sandbox")
+                    sanitized_id = booking_id.replace("-", "")
+                    if env == "production":
+                        url = f"https://api.phonepe.com/apis/pg/checkout/v2/order/{sanitized_id}/status"
+                    else:
+                        url = f"https://api-preprod.phonepe.com/apis/pg-sandbox/checkout/v2/order/{sanitized_id}/status"
+                    
+                    headers = {"Authorization": f"O-Bearer {token}"}
+                    res = requests.get(url, headers=headers, timeout=3)
+                    if res.status_code == 200:
+                        res_data = res.json()
+                        state = res_data.get("state") or res_data.get("status")
+                        if state == "COMPLETED":
+                            await db.bookings.update_one({"id": booking_id}, {"$set": {"payment_status": "paid"}})
+                except Exception as ex:
+                    logger.error(f"Background PhonePe sync failed for {booking_id}: {str(ex)}")
+    except Exception as e:
+        logger.error(f"Failed to query pending bookings for auto-sync: {str(e)}")
+
+    # Return active queued bookings
     cursor = db.bookings.find(
         {"status": "queued", "$or": [{"payment_method": "cash"}, {"payment_status": "paid"}]},
         {"_id": 0},
