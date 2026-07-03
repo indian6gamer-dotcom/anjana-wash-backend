@@ -412,9 +412,16 @@ class PostgresDB:
             status TEXT NOT NULL,
             worker_photo TEXT,
             created_at TEXT NOT NULL,
-            completed_at TEXT
+            completed_at TEXT,
+            booking_source TEXT
         )
         """)
+        
+        # Self-healing migration for existing databases
+        try:
+            cursor.execute("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booking_source TEXT")
+        except Exception:
+            pass
         
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS config (
