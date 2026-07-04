@@ -823,7 +823,17 @@ import json
 import requests
 from fastapi import Request
 
+OAUTH_TOKEN_CACHE = {
+    "token": None,
+    "expires_at": 0
+}
+
 def _get_oauth_token():
+    import time
+    now = time.time()
+    if OAUTH_TOKEN_CACHE["token"] and OAUTH_TOKEN_CACHE["expires_at"] > now:
+        return OAUTH_TOKEN_CACHE["token"]
+
     client_id = os.environ.get("PHONEPE_CLIENT_ID")
     client_secret = os.environ.get("PHONEPE_CLIENT_SECRET")
     client_version = os.environ.get("PHONEPE_CLIENT_VERSION", "1")
@@ -852,6 +862,9 @@ def _get_oauth_token():
     res_json = response.json()
     
     if "access_token" in res_json:
+        # Cache for 50 minutes (3000 seconds) to be safe (PhonePe standard is 60 minutes)
+        OAUTH_TOKEN_CACHE["token"] = res_json["access_token"]
+        OAUTH_TOKEN_CACHE["expires_at"] = now + 3000
         return res_json["access_token"]
     else:
         raise Exception(f"OAuth Token Generation failed: {res_json.get('error_description', 'Unknown Error')}")
