@@ -268,6 +268,10 @@ class UpdatePinRequest(BaseModel):
     new_pin: str
 
 
+class OwnerActionRequest(BaseModel):
+    owner_pin: str
+
+
 class PaymentInitiateRequest(BaseModel):
     booking_id: str
 
@@ -466,7 +470,10 @@ async def create_booking(payload: BookingCreate):
     combined_names = ", ".join(s["name"] for s in services)
     
     leaf = LEAF_BY_ID[payload.category_id]
-    token = await generate_daily_token()
+    if payload.payment_method == "online":
+        token = "Pending Payment"
+    else:
+        token = await generate_daily_token()
     booking = Booking(
         id=str(uuid.uuid4()),
         token=token,
@@ -533,13 +540,20 @@ async def queue():
                         res_data = res.json()
                         state = res_data.get("state") or res_data.get("status")
                         if state == "COMPLETED":
-                            await db.bookings.update_one({"id": booking_id}, {"$set": {"payment_status": "paid"}})
+                            fresh_b = await db.bookings.find_one({"id": booking_id})
+                            if fresh_b and fresh_b.get("token") == "Pending Payment":
+                                new_token = await generate_daily_token()
+                                await db.bookings.update_one({"id": booking_id}, {"$set": {"payment_status": "paid", "token": new_token}})
+                            else:
+                                await db.bookings.update_one({"id": booking_id}, {"$set": {"payment_status": "paid"}})
+                        elif state in ("FAILED", "EXPIRED", "CANCELLED"):
+                            await db.bookings.delete_one({"id": booking_id})
                 except Exception as ex:
                     logger.error(f"Background PhonePe sync failed for {booking_id}: {str(ex)}")
     except Exception as e:
         logger.error(f"Failed to query pending bookings for auto-sync: {str(e)}")
 
-    # Return active queued bookings
+    # Return active queued bookings (paid online or any cash bookings)
     cursor = db.bookings.find(
         {"status": "queued", "$or": [{"payment_method": "cash"}, {"payment_status": "paid"}]},
         {"_id": 0},
@@ -587,8 +601,15 @@ async def get_booking(booking_id: str):
                 # Check status: PhonePe V2 status is typically in res_data.get("state")
                 state = res_data.get("state") or res_data.get("status")
                 if state == "COMPLETED":
-                    await db.bookings.update_one({"id": booking_id}, {"$set": {"payment_status": "paid"}})
+                    if doc.get("token") == "Pending Payment":
+                        new_token = await generate_daily_token()
+                        await db.bookings.update_one({"id": booking_id}, {"$set": {"payment_status": "paid", "token": new_token}})
+                    else:
+                        await db.bookings.update_one({"id": booking_id}, {"$set": {"payment_status": "paid"}})
                     doc = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+                elif state in ("FAILED", "EXPIRED", "CANCELLED"):
+                    await db.bookings.delete_one({"id": booking_id})
+                    raise HTTPException(400, "Payment failed or cancelled")
             except Exception as e:
                 logger.error(f"Error auto-checking PhonePe status for booking {booking_id}: {str(e)}")
                 
@@ -614,6 +635,17 @@ async def complete_booking(booking_id: str, payload: CompleteBookingRequest = Co
         update["worker_photo"] = payload.worker_photo
 
     await db.bookings.update_one({"id": booking_id}, {"$set": update})
+    new_doc = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+    return new_doc
+
+
+@api_router.post("/bookings/{booking_id}/mark-paid", response_model=Booking)
+async def owner_mark_paid(booking_id: str, payload: OwnerActionRequest):
+    await verify_owner_pin_or_raise(payload.owner_pin)
+    doc = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Booking not found")
+    await db.bookings.update_one({"id": booking_id}, {"$set": {"payment_status": "paid"}})
     new_doc = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
     return new_doc
 
@@ -928,7 +960,11 @@ async def _payment_callback(booking_id: str):
     doc = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
     if not doc:
         raise HTTPException(404, "Booking not found")
-    await db.bookings.update_one({"id": booking_id}, {"$set": {"payment_status": "paid"}})
+    if doc.get("token") == "Pending Payment":
+        new_token = await generate_daily_token()
+        await db.bookings.update_one({"id": booking_id}, {"$set": {"payment_status": "paid", "token": new_token}})
+    else:
+        await db.bookings.update_one({"id": booking_id}, {"$set": {"payment_status": "paid"}})
     new_doc = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
     return {"success": True, "booking": new_doc}
 
