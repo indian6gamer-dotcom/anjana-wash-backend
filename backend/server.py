@@ -289,9 +289,14 @@ async def get_service_doc(service_id: str):
     return doc
 
 
+PIN_CACHE = {
+    "worker_pin": "1234",
+    "owner_pin": "9999"
+}
+
+
 async def verify_owner_pin_or_raise(pin: str):
-    cfg = await db.config.find_one({"_id": "pins"}, {"_id": 0})
-    if not cfg or cfg.get("owner_pin") != pin:
+    if PIN_CACHE.get("owner_pin") != pin:
         raise HTTPException(403, "Invalid owner PIN")
 
 
@@ -308,9 +313,16 @@ async def generate_daily_token() -> str:
 
 
 async def init_config():
+    global PIN_CACHE
     existing = await db.config.find_one({"_id": "pins"}, {"_id": 0})
     if not existing:
         await db.config.insert_one({"_id": "pins", "worker_pin": "1234", "owner_pin": "9999"})
+        PIN_CACHE = {"worker_pin": "1234", "owner_pin": "9999"}
+    else:
+        PIN_CACHE = {
+            "worker_pin": existing.get("worker_pin", "1234"),
+            "owner_pin": existing.get("owner_pin", "9999")
+        }
 
 
 async def init_services():
@@ -836,20 +848,15 @@ async def clear_archive(payload: ClearRequest):
 # ---------- PIN ----------
 @api_router.post("/auth/verify-pin")
 async def verify_pin(payload: PinRequest):
-    cfg = await db.config.find_one({"_id": "pins"}, {"_id": 0})
-    if not cfg:
-        await init_config()
-        cfg = await db.config.find_one({"_id": "pins"}, {"_id": 0})
     key = f"{payload.role}_pin"
-    if key not in cfg:
+    if key not in PIN_CACHE:
         raise HTTPException(400, "Invalid role")
-    return {"success": cfg[key] == payload.pin}
+    return {"success": PIN_CACHE[key] == payload.pin}
 
 
 @api_router.post("/auth/update-pin")
 async def update_pin(payload: UpdatePinRequest):
-    cfg = await db.config.find_one({"_id": "pins"}, {"_id": 0})
-    if not cfg or cfg.get("owner_pin") != payload.owner_pin:
+    if PIN_CACHE.get("owner_pin") != payload.owner_pin:
         raise HTTPException(403, "Invalid owner PIN")
     if payload.role not in ("worker", "owner"):
         raise HTTPException(400, "Invalid role")
@@ -859,6 +866,8 @@ async def update_pin(payload: UpdatePinRequest):
         {"_id": "pins"},
         {"$set": {f"{payload.role}_pin": payload.new_pin}},
     )
+    # Update memory cache
+    PIN_CACHE[f"{payload.role}_pin"] = payload.new_pin
     return {"success": True}
 
 
