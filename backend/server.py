@@ -81,7 +81,7 @@ class ServiceDelete(BaseModel):
 CATEGORIES = [
     {"id": "car", "label": "Car", "icon": "Car", "children": [
         {"id": "small_car", "label": "Small Car", "icon": "Car"},
-        {"id": "xuv", "label": "XUV / SUV", "icon": "Car"},
+        {"id": "xuv", "label": "Compact SUV", "icon": "Car"},
         {"id": "7seater", "label": "7-Seater", "icon": "Car"},
     ]},
     {"id": "auto", "label": "Auto", "icon": "Bus", "children": []},
@@ -235,7 +235,7 @@ class Booking(BaseModel):
     customer_name: str
     phone: str
     vehicle_number: str
-    vehicle_photo: str
+    vehicle_photo: Optional[str] = ""
     category_id: str
     category_label: str
     parent_category_id: Optional[str] = None
@@ -556,7 +556,7 @@ async def queue():
     # Return active queued bookings (paid online or any cash bookings)
     cursor = db.bookings.find(
         {"status": "queued", "$or": [{"payment_method": "cash"}, {"payment_status": "paid"}]},
-        {"_id": 0},
+        {"_id": 0, "vehicle_photo": 0, "worker_photo": 0},
     ).sort("created_at", 1)
     return await cursor.to_list(500)
 
@@ -566,7 +566,7 @@ async def all_bookings(date: Optional[str] = None):
     q = {}
     if date:
         q["created_at"] = {"$regex": f"^{date}"}
-    cursor = db.bookings.find(q, {"_id": 0}).sort("created_at", -1)
+    cursor = db.bookings.find(q, {"_id": 0, "vehicle_photo": 0, "worker_photo": 0}).sort("created_at", -1)
     return await cursor.to_list(1000)
 
 
@@ -614,6 +614,17 @@ async def get_booking(booking_id: str):
                 logger.error(f"Error auto-checking PhonePe status for booking {booking_id}: {str(e)}")
                 
     return doc
+
+
+@api_router.get("/bookings/{booking_id}/photo")
+async def get_booking_photo(booking_id: str):
+    doc = await db.bookings.find_one({"id": booking_id})
+    if not doc:
+        raise HTTPException(404, "Booking not found")
+    return {
+        "vehicle_photo": doc.get("vehicle_photo", ""),
+        "worker_photo": doc.get("worker_photo", "")
+    }
 
 
 @api_router.post("/bookings/{booking_id}/complete", response_model=Booking)
