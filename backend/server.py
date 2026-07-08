@@ -501,6 +501,16 @@ async def create_booking(payload: BookingCreate):
     return booking
 
 
+@api_router.get("/bookings/latest-id")
+async def get_latest_id():
+    cursor = db.bookings.find(
+        {"status": "queued", "$or": [{"payment_method": "cash"}, {"payment_status": "paid"}]},
+        {"id": 1}
+    ).sort("created_at", -1)
+    res = await cursor.to_list(1)
+    return {"latest_id": res[0]["id"] if res else ""}
+
+
 async def auto_cleanup_old_photos():
     try:
         from datetime import datetime, timedelta
@@ -580,7 +590,7 @@ async def queue():
     # Return active queued bookings (paid online or any cash bookings)
     cursor = db.bookings.find(
         {"status": "queued", "$or": [{"payment_method": "cash"}, {"payment_status": "paid"}]},
-        {"_id": 0, "vehicle_photo": 0, "worker_photo": 0},
+        {"_id": 0},
     ).sort("created_at", 1)
     return await cursor.to_list(500)
 
@@ -590,7 +600,7 @@ async def all_bookings(date: Optional[str] = None):
     q = {}
     if date:
         q["created_at"] = {"$regex": f"^{date}"}
-    cursor = db.bookings.find(q, {"_id": 0, "vehicle_photo": 0, "worker_photo": 0}).sort("created_at", -1)
+    cursor = db.bookings.find(q, {"_id": 0}).sort("created_at", -1)
     return await cursor.to_list(1000)
 
 
