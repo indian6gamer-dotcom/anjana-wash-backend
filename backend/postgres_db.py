@@ -233,7 +233,14 @@ class bookings_collection:
         rows = cursor.fetchall()
         conn.close()
         
-        items = [dict(r) for r in rows]
+        items = []
+        for r in rows:
+            d = dict(r)
+            if projection:
+                for k, v in projection.items():
+                    if v == 0:
+                        d.pop(k, None)
+            items.append(d)
         return PostgresCursor(items)
 
     async def insert_one(self, doc):
@@ -270,7 +277,30 @@ class bookings_collection:
         conn.close()
 
     async def update_many(self, filter, update):
-        pass
+        conn = self._connect()
+        cursor = conn.cursor()
+        
+        where_clauses = []
+        where_params = []
+        for k, v in filter.items():
+            if isinstance(v, dict) and "$lt" in v:
+                where_clauses.append(f"{k} < %s")
+                where_params.append(v["$lt"])
+            else:
+                where_clauses.append(f"{k} = %s")
+                where_params.append(v)
+                
+        set_clauses = []
+        set_params = []
+        for k, v in update.get("$set", {}).items():
+            set_clauses.append(f"{k} = %s")
+            set_params.append(v)
+            
+        where_str = " AND ".join(where_clauses) if where_clauses else "1=1"
+        query = f"UPDATE bookings SET {', '.join(set_clauses)} WHERE {where_str}"
+        cursor.execute(query, set_params + where_params)
+        conn.commit()
+        conn.close()
 
     async def delete_one(self, filter):
         conn = self._connect()

@@ -501,8 +501,32 @@ async def create_booking(payload: BookingCreate):
     return booking
 
 
+async def auto_cleanup_old_photos():
+    try:
+        from datetime import datetime, timedelta
+        now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+        fifteen_days_ago = (now_ist - timedelta(days=15)).isoformat()
+        await db.bookings.update_many(
+            {"created_at": {"$lt": fifteen_days_ago}},
+            {"$set": {"vehicle_photo": "", "worker_photo": ""}}
+        )
+        logger.info("Automatic database photo cleanup finished.")
+    except Exception as ex:
+        logger.error(f"Automatic database photo cleanup failed: {str(ex)}")
+
+
+LAST_CLEANUP = 0
+
+
 @api_router.get("/bookings/queue", response_model=List[Booking])
 async def queue():
+    global LAST_CLEANUP
+    import time, asyncio
+    now_ts = time.time()
+    if now_ts - LAST_CLEANUP > 43200:  # every 12 hours
+        LAST_CLEANUP = now_ts
+        asyncio.create_task(auto_cleanup_old_photos())
+
     # Automatically verify/sync any pending online bookings created in the last 15 minutes
     # This ensures that even if a customer closes their tab or loses internet during payment,
     # the server will detect it and add it to the worker queue within 12 seconds.
@@ -869,8 +893,12 @@ def _get_oauth_token():
     import urllib.parse
     encoded_data = urllib.parse.urlencode(data)
     
-    response = requests.post(url, data=encoded_data, headers=headers, timeout=10)
-    res_json = response.json()
+    try:
+        response = requests.post(url, data=encoded_data, headers=headers, timeout=10)
+        res_json = response.json()
+    except Exception as e:
+        logger.error(f"PhonePe OAuth network/json error: {str(e)}")
+        raise HTTPException(502, f"PhonePe authorization request failed: Network Error")
     
     if "access_token" in res_json:
         # Cache for 50 minutes (3000 seconds) to be safe (PhonePe standard is 60 minutes)
