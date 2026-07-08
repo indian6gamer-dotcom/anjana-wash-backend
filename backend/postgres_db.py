@@ -283,9 +283,15 @@ class bookings_collection:
         where_clauses = []
         where_params = []
         for k, v in filter.items():
-            if isinstance(v, dict) and "$lt" in v:
-                where_clauses.append(f"{k} < %s")
-                where_params.append(v["$lt"])
+            if isinstance(v, dict):
+                if "$lt" in v:
+                    where_clauses.append(f"{k} < %s")
+                    where_params.append(v["$lt"])
+                elif "$exists" in v:
+                    if v["$exists"] is False:
+                        where_clauses.append(f"{k} IS NULL")
+                    else:
+                        where_clauses.append(f"{k} IS NOT NULL")
             else:
                 where_clauses.append(f"{k} = %s")
                 where_params.append(v)
