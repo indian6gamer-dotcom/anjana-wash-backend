@@ -150,8 +150,10 @@ class services_collection:
             
         query = f"UPDATE services SET {', '.join(set_clauses)} WHERE {' AND '.join(where_clauses)}"
         cursor.execute(query, set_params + where_params)
+        rowcount = cursor.rowcount
         conn.commit()
         conn.close()
+        return rowcount
 
     async def delete_one(self, filter):
         conn = self._connect()
@@ -280,8 +282,10 @@ class bookings_collection:
             
         query = f"UPDATE bookings SET {', '.join(set_clauses)} WHERE {' AND '.join(where_clauses)}"
         cursor.execute(query, set_params + where_params)
+        rowcount = cursor.rowcount
         conn.commit()
         conn.close()
+        return rowcount
 
     async def update_many(self, filter, update):
         conn = self._connect()
@@ -290,9 +294,15 @@ class bookings_collection:
         where_clauses = []
         where_params = []
         for k, v in filter.items():
-            if isinstance(v, dict) and "$lt" in v:
-                where_clauses.append(f"{k} < ?")
-                where_params.append(v["$lt"])
+            if isinstance(v, dict):
+                if "$lt" in v:
+                    where_clauses.append(f"{k} < ?")
+                    where_params.append(v["$lt"])
+                elif "$exists" in v:
+                    if v["$exists"] is False:
+                        where_clauses.append(f"{k} IS NULL")
+                    else:
+                        where_clauses.append(f"{k} IS NOT NULL")
             else:
                 where_clauses.append(f"{k} = ?")
                 where_params.append(v)
@@ -386,26 +396,20 @@ class counters_collection:
         conn = self._connect()
         cursor = conn.cursor()
         counter_id = filter.get("_id")
-        
-        cursor.execute("SELECT seq FROM counters WHERE id = ?", (counter_id,))
-        row = cursor.fetchone()
-        
         inc_val = update.get("$inc", {}).get("seq", 1)
         
-        if not row:
-            if upsert:
-                cursor.execute("INSERT INTO counters (id, seq) VALUES (?, ?)", (counter_id, inc_val))
-                seq = inc_val
-            else:
-                conn.close()
-                return None
-        else:
-            seq = row["seq"] + inc_val
-            cursor.execute("UPDATE counters SET seq = ? WHERE id = ?", (seq, counter_id))
-            
+        query = """
+        INSERT INTO counters (id, seq) VALUES (?, ?)
+        ON CONFLICT (id)
+        DO UPDATE SET seq = counters.seq + excluded.seq
+        RETURNING seq
+        """
+        cursor.execute(query, (counter_id, inc_val))
+        row = cursor.fetchone()
         conn.commit()
         conn.close()
         
+        seq = row["seq"] if row else inc_val
         return {"_id": counter_id, "seq": seq}
 
 class SQLiteDB:

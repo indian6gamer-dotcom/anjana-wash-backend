@@ -35,6 +35,17 @@ client = db
 app = FastAPI(title="Anjana Wash API")
 api_router = APIRouter(prefix="/api")
 
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled Exception on {request.method} {request.url.path}: {str(exc)}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An internal server error occurred."}
+    )
+
 IST_OFFSET = timedelta(hours=5, minutes=30)
 
 
@@ -300,6 +311,11 @@ async def verify_owner_pin_or_raise(pin: str):
         raise HTTPException(403, "Invalid owner PIN")
 
 
+async def verify_worker_or_owner_pin_or_raise(pin: str):
+    if PIN_CACHE.get("owner_pin") != pin and PIN_CACHE.get("worker_pin") != pin:
+        raise HTTPException(403, "Invalid PIN")
+
+
 async def generate_daily_token() -> str:
     today = today_key()
     counter = await db.counters.find_one_and_update(
@@ -400,7 +416,8 @@ async def services_by_category(category_id: str):
 
 
 @api_router.get("/owner/services", response_model=List[Service])
-async def owner_list_services():
+async def owner_list_services(owner_pin: str):
+    await verify_owner_pin_or_raise(owner_pin)
     # returns all services incl. inactive (owner can toggle)
     cursor = db.services.find({}, {"_id": 0}).sort([("category_id", 1), ("price", 1)])
     return await cursor.to_list(500)
@@ -458,8 +475,25 @@ async def owner_delete_service(service_id: str, payload: ServiceDelete):
     return {"success": True}
 
 
+import time
+from collections import defaultdict
+
+# IP-based rate limiter (max 20 bookings per minute per IP)
+booking_rate_limit = defaultdict(list)
+
+def check_booking_rate_limit(ip: str) -> bool:
+    now = time.time()
+    booking_rate_limit[ip] = [t for t in booking_rate_limit[ip] if now - t < 60]
+    if len(booking_rate_limit[ip]) >= 20:
+        return False
+    booking_rate_limit[ip].append(now)
+    return True
+
 @api_router.post("/bookings", response_model=Booking)
-async def create_booking(payload: BookingCreate):
+async def create_booking(payload: BookingCreate, request: Request):
+    client_ip = request.client.host if request.client else "unknown"
+    if not check_booking_rate_limit(client_ip):
+        raise HTTPException(429, "Too many bookings created. Please wait a minute.")
     if payload.payment_method not in ("cash", "online"):
         raise HTTPException(400, "Invalid payment method")
     if payload.payment_method == "online" and payload.payment_provider not in ("phonepe", "gpay"):
@@ -482,10 +516,9 @@ async def create_booking(payload: BookingCreate):
     combined_names = ", ".join(s["name"] for s in services)
     
     leaf = LEAF_BY_ID[payload.category_id]
-    if payload.payment_method == "online":
-        token = "Pending Payment"
-    else:
-        token = await generate_daily_token()
+    token = await generate_daily_token()
+    status = "pending" if payload.payment_method == "online" else "queued"
+    
     booking = Booking(
         id=str(uuid.uuid4()),
         token=token,
@@ -503,7 +536,7 @@ async def create_booking(payload: BookingCreate):
         payment_method=payload.payment_method,
         payment_provider=payload.payment_provider if payload.payment_method == "online" else None,
         payment_status="pending",
-        status="queued",
+        status=status,
         worker_photo=payload.worker_photo,
         created_at=now_ist_iso(),
         booking_source=payload.booking_source or "walkin"
@@ -586,12 +619,7 @@ async def queue():
                         res_data = res.json()
                         state = res_data.get("state") or res_data.get("status")
                         if state == "COMPLETED":
-                            fresh_b = await db.bookings.find_one({"id": booking_id})
-                            if fresh_b and fresh_b.get("token") == "Pending Payment":
-                                new_token = await generate_daily_token()
-                                await db.bookings.update_one({"id": booking_id}, {"$set": {"payment_status": "paid", "token": new_token}})
-                            else:
-                                await db.bookings.update_one({"id": booking_id}, {"$set": {"payment_status": "paid"}})
+                            await _payment_callback(booking_id)
                         elif state in ("FAILED", "EXPIRED", "CANCELLED"):
                             await db.bookings.delete_one({"id": booking_id})
                 except Exception as ex:
@@ -602,17 +630,22 @@ async def queue():
     # Return active queued bookings (paid online or any cash bookings)
     cursor = db.bookings.find(
         {"status": "queued", "$or": [{"payment_method": "cash"}, {"payment_status": "paid"}]},
-        {"_id": 0},
+        {"_id": 0, "vehicle_photo": 0},
     ).sort("created_at", 1)
     return await cursor.to_list(500)
 
 
 @api_router.get("/bookings", response_model=List[Booking])
-async def all_bookings(date: Optional[str] = None):
+async def all_bookings(date: Optional[str] = None, pin: Optional[str] = None):
+    today = today_key()
+    if not date or date != today:
+        if not pin:
+            raise HTTPException(401, "PIN required for historical bookings")
+        await verify_worker_or_owner_pin_or_raise(pin)
     q = {}
     if date:
         q["created_at"] = {"$regex": f"^{date}"}
-    cursor = db.bookings.find(q, {"_id": 0}).sort("created_at", -1)
+    cursor = db.bookings.find(q, {"_id": 0, "vehicle_photo": 0}).sort("created_at", -1)
     return await cursor.to_list(1000)
 
 
@@ -647,11 +680,7 @@ async def get_booking(booking_id: str):
                 # Check status: PhonePe V2 status is typically in res_data.get("state")
                 state = res_data.get("state") or res_data.get("status")
                 if state == "COMPLETED":
-                    if doc.get("token") == "Pending Payment":
-                        new_token = await generate_daily_token()
-                        await db.bookings.update_one({"id": booking_id}, {"$set": {"payment_status": "paid", "token": new_token}})
-                    else:
-                        await db.bookings.update_one({"id": booking_id}, {"$set": {"payment_status": "paid"}})
+                    await _payment_callback(booking_id)
                     doc = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
                 elif state in ("FAILED", "EXPIRED", "CANCELLED"):
                     await db.bookings.delete_one({"id": booking_id})
@@ -665,12 +694,23 @@ async def get_booking(booking_id: str):
 @api_router.get("/bookings/{booking_id}/photo")
 async def get_booking_photo(booking_id: str):
     doc = await db.bookings.find_one({"id": booking_id})
-    if not doc:
-        raise HTTPException(404, "Booking not found")
-    return {
-        "vehicle_photo": doc.get("vehicle_photo", ""),
-        "worker_photo": doc.get("worker_photo", "")
-    }
+    if not doc or not doc.get("vehicle_photo"):
+        raise HTTPException(404, "Photo not found")
+        
+    b64_data = doc["vehicle_photo"]
+    if "," in b64_data:
+        b64_data = b64_data.split(",")[1]
+        
+    try:
+        img_bytes = base64.b64decode(b64_data)
+        from fastapi.responses import Response
+        return Response(
+            content=img_bytes,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=604800"}
+        )
+    except Exception:
+        raise HTTPException(400, "Invalid image data")
 
 
 @api_router.post("/bookings/{booking_id}/complete", response_model=Booking)
@@ -708,7 +748,9 @@ async def owner_mark_paid(booking_id: str, payload: OwnerActionRequest):
 
 
 @api_router.get("/bookings/stats/today")
-async def today_stats():
+async def today_stats(pin: Optional[str] = None):
+    if pin:
+        await verify_worker_or_owner_pin_or_raise(pin)
     today = today_key()
     cursor = db.bookings.find({"created_at": {"$regex": f"^{today}"}}, {"_id": 0})
     items = await cursor.to_list(1000)
@@ -1027,16 +1069,52 @@ async def _payment_initiate(booking_id: str, provider: str):
         "mocked": True,
     }
 
+async def verify_phonepe_payment_status(booking_id: str) -> bool:
+    env = os.environ.get("PHONEPE_ENV", "sandbox")
+    # In sandbox/mock, auto-approve payment to make testing easy
+    if env != "production":
+        return True
+        
+    client_id = os.environ.get("PHONEPE_CLIENT_ID")
+    client_secret = os.environ.get("PHONEPE_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        return False
+        
+    try:
+        token = _get_oauth_token()
+        sanitized_id = booking_id.replace("-", "")
+        url = f"https://api.phonepe.com/apis/pg/checkout/v2/order/{sanitized_id}/status"
+        headers = {
+            "Authorization": f"O-Bearer {token}"
+        }
+        import requests
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200:
+            res_data = res.json()
+            state = res_data.get("state") or res_data.get("status")
+            return state == "COMPLETED"
+    except Exception as e:
+        logger.error(f"Error checking PhonePe payment status for verification: {e}")
+    return False
+
 async def _payment_callback(booking_id: str):
-    doc = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
-    if not doc:
-        raise HTTPException(404, "Booking not found")
-    if doc.get("token") == "Pending Payment":
-        new_token = await generate_daily_token()
-        await db.bookings.update_one({"id": booking_id}, {"$set": {"payment_status": "paid", "token": new_token}})
-    else:
-        await db.bookings.update_one({"id": booking_id}, {"$set": {"payment_status": "paid"}})
+    # Verify transaction with PhonePe before processing callback to prevent spoofing
+    is_valid = await verify_phonepe_payment_status(booking_id)
+    if not is_valid:
+        raise HTTPException(400, "Payment verification failed or not completed on PhonePe")
+
+    # Atomic transaction step:
+    # Attempt to transition payment_status from "pending" to "paid" and status to "queued"
+    # This prevents any other concurrent request from double-processing!
+    modified = await db.bookings.update_one(
+        {"id": booking_id, "payment_status": "pending"},
+        {"$set": {"payment_status": "paid", "status": "queued"}}
+    )
+    
     new_doc = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+    if not new_doc:
+        raise HTTPException(404, "Booking not found")
+    return {"success": True, "booking": new_doc}
     return {"success": True, "booking": new_doc}
 
 
