@@ -1031,29 +1031,18 @@ async def phonepe_initiate(payload: PaymentInitiateRequest):
     
     client_id = os.environ.get("PHONEPE_CLIENT_ID")
     client_secret = os.environ.get("PHONEPE_CLIENT_SECRET")
-    use_mock = os.environ.get("PHONEPE_MOCK", "false").lower() == "true"
     
-    if client_id and client_secret and not use_mock:
-        try:
-            checkout_url = await _phonepe_initiate_real(payload.booking_id, doc["price"], doc["phone"])
-            return {
-                "success": True,
-                "checkout_url": checkout_url,
-                "merchant_order_id": payload.booking_id,
-                "amount": doc["price"],
-                "provider": "phonepe",
-                "mocked": False,
-            }
-        except Exception as e:
-            logger.warning(f"Real PhonePe initiation failed: {e}. Falling back to simulator.")
-            
+    if not client_id or not client_secret:
+        raise HTTPException(400, "PhonePe client credentials are not configured in environment variables.")
+        
+    checkout_url = await _phonepe_initiate_real(payload.booking_id, doc["price"], doc["phone"])
     return {
         "success": True,
-        "checkout_url": f"/phonepe-mock?booking_id={payload.booking_id}",
+        "checkout_url": checkout_url,
         "merchant_order_id": payload.booking_id,
         "amount": doc["price"],
         "provider": "phonepe",
-        "mocked": True,
+        "mocked": False,
     }
 
 @api_router.post("/payment/phonepe/callback")
