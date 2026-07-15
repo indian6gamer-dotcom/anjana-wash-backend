@@ -305,6 +305,8 @@ PIN_CACHE = {
     "owner_pin": "9999"
 }
 
+LAST_STATUS_CHECK = {}
+
 
 async def verify_owner_pin_or_raise(pin: str):
     if PIN_CACHE.get("owner_pin") != pin:
@@ -516,8 +518,12 @@ async def create_booking(payload: BookingCreate, request: Request):
     combined_names = ", ".join(s["name"] for s in services)
     
     leaf = LEAF_BY_ID[payload.category_id]
-    token = await generate_daily_token()
-    status = "pending" if payload.payment_method == "online" else "queued"
+    if payload.payment_method == "online":
+        token = "Pending Payment"
+        status = "pending"
+    else:
+        token = await generate_daily_token()
+        status = "queued"
     
     booking = Booking(
         id=str(uuid.uuid4()),
@@ -657,36 +663,41 @@ async def get_booking(booking_id: str):
         
     # Auto-check status if online phonepe and pending
     if doc.get("payment_method") == "online" and doc.get("payment_provider") == "phonepe" and doc.get("payment_status") == "pending":
-        client_id = os.environ.get("PHONEPE_CLIENT_ID")
-        client_secret = os.environ.get("PHONEPE_CLIENT_SECRET")
-        if client_id and client_secret:
-            try:
-                token = _get_oauth_token()
-                env = os.environ.get("PHONEPE_ENV", "sandbox")
-                
-                sanitized_id = booking_id.replace("-", "")
-                if env == "production":
-                    url = f"https://api.phonepe.com/apis/pg/checkout/v2/order/{sanitized_id}/status"
-                else:
-                    url = f"https://api-preprod.phonepe.com/apis/pg-sandbox/checkout/v2/order/{sanitized_id}/status"
+        import time
+        now = time.time()
+        last_check = LAST_STATUS_CHECK.get(booking_id, 0)
+        if now - last_check > 10:
+            LAST_STATUS_CHECK[booking_id] = now
+            client_id = os.environ.get("PHONEPE_CLIENT_ID")
+            client_secret = os.environ.get("PHONEPE_CLIENT_SECRET")
+            if client_id and client_secret:
+                try:
+                    token = _get_oauth_token()
+                    env = os.environ.get("PHONEPE_ENV", "sandbox")
                     
-                headers = {
-                    "Authorization": f"O-Bearer {token}"
-                }
-                
-                res = requests.get(url, headers=headers, timeout=5)
-                res_data = res.json()
-                
-                # Check status: PhonePe V2 status is typically in res_data.get("state")
-                state = res_data.get("state") or res_data.get("status")
-                if state == "COMPLETED":
-                    await _payment_callback(booking_id)
-                    doc = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
-                elif state in ("FAILED", "EXPIRED", "CANCELLED"):
-                    await db.bookings.delete_one({"id": booking_id})
-                    raise HTTPException(400, "Payment failed or cancelled")
-            except Exception as e:
-                logger.error(f"Error auto-checking PhonePe status for booking {booking_id}: {str(e)}")
+                    sanitized_id = booking_id.replace("-", "")
+                    if env == "production":
+                        url = f"https://api.phonepe.com/apis/pg/checkout/v2/order/{sanitized_id}/status"
+                    else:
+                        url = f"https://api-preprod.phonepe.com/apis/pg-sandbox/checkout/v2/order/{sanitized_id}/status"
+                        
+                    headers = {
+                        "Authorization": f"O-Bearer {token}"
+                    }
+                    
+                    res = requests.get(url, headers=headers, timeout=5)
+                    res_data = res.json()
+                    
+                    # Check status: PhonePe V2 status is typically in res_data.get("state")
+                    state = res_data.get("state") or res_data.get("status")
+                    if state == "COMPLETED":
+                        await _payment_callback(booking_id)
+                        doc = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
+                    elif state in ("FAILED", "EXPIRED", "CANCELLED"):
+                        await db.bookings.delete_one({"id": booking_id})
+                        raise HTTPException(400, "Payment failed or cancelled")
+                except Exception as e:
+                    logger.error(f"Error auto-checking PhonePe status for booking {booking_id}: {str(e)}")
                 
     return doc
 
@@ -1020,26 +1031,30 @@ async def phonepe_initiate(payload: PaymentInitiateRequest):
     
     client_id = os.environ.get("PHONEPE_CLIENT_ID")
     client_secret = os.environ.get("PHONEPE_CLIENT_SECRET")
+    use_mock = os.environ.get("PHONEPE_MOCK", "false").lower() == "true"
     
-    if client_id and client_secret:
-        checkout_url = await _phonepe_initiate_real(payload.booking_id, doc["price"], doc["phone"])
-        return {
-            "success": True,
-            "checkout_url": checkout_url,
-            "merchant_order_id": payload.booking_id,
-            "amount": doc["price"],
-            "provider": "phonepe",
-            "mocked": False,
-        }
-    else:
-        return {
-            "success": True,
-            "checkout_url": f"/phonepe-mock?booking_id={payload.booking_id}",
-            "merchant_order_id": payload.booking_id,
-            "amount": doc["price"],
-            "provider": "phonepe",
-            "mocked": True,
-        }
+    if client_id and client_secret and not use_mock:
+        try:
+            checkout_url = await _phonepe_initiate_real(payload.booking_id, doc["price"], doc["phone"])
+            return {
+                "success": True,
+                "checkout_url": checkout_url,
+                "merchant_order_id": payload.booking_id,
+                "amount": doc["price"],
+                "provider": "phonepe",
+                "mocked": False,
+            }
+        except Exception as e:
+            logger.warning(f"Real PhonePe initiation failed: {e}. Falling back to simulator.")
+            
+    return {
+        "success": True,
+        "checkout_url": f"/phonepe-mock?booking_id={payload.booking_id}",
+        "merchant_order_id": payload.booking_id,
+        "amount": doc["price"],
+        "provider": "phonepe",
+        "mocked": True,
+    }
 
 @api_router.post("/payment/phonepe/callback")
 async def phonepe_callback(payload: PaymentInitiateRequest):
@@ -1104,17 +1119,31 @@ async def _payment_callback(booking_id: str):
         raise HTTPException(400, "Payment verification failed or not completed on PhonePe")
 
     # Atomic transaction step:
-    # Attempt to transition payment_status from "pending" to "paid" and status to "queued"
+    # Attempt to transition token from "Pending Payment" to "Processing"
     # This prevents any other concurrent request from double-processing!
     modified = await db.bookings.update_one(
-        {"id": booking_id, "payment_status": "pending"},
-        {"$set": {"payment_status": "paid", "status": "queued"}}
+        {"id": booking_id, "token": "Pending Payment"},
+        {"$set": {"token": "Processing", "payment_status": "paid", "status": "queued"}}
     )
     
+    if modified == 1:
+        try:
+            new_token = await generate_daily_token()
+            await db.bookings.update_one(
+                {"id": booking_id},
+                {"$set": {"token": new_token}}
+            )
+        except Exception as e:
+            logger.error(f"Failed to generate token for booking {booking_id}: {e}")
+            await db.bookings.update_one(
+                {"id": booking_id, "token": "Processing"},
+                {"$set": {"token": "Pending Payment", "payment_status": "pending", "status": "pending"}}
+            )
+            raise HTTPException(500, "Token generation failed")
+            
     new_doc = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
     if not new_doc:
         raise HTTPException(404, "Booking not found")
-    return {"success": True, "booking": new_doc}
     return {"success": True, "booking": new_doc}
 
 
