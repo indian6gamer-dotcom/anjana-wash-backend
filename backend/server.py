@@ -578,22 +578,11 @@ async def auto_cleanup_old_photos():
 
 LAST_CLEANUP = 0
 
-
-@api_router.get("/bookings/queue", response_model=List[Booking])
-async def queue():
-    global LAST_CLEANUP
-    import time, asyncio
-    now_ts = time.time()
-    if now_ts - LAST_CLEANUP > 43200:  # every 12 hours
-        LAST_CLEANUP = now_ts
-        asyncio.create_task(auto_cleanup_old_photos())
-
-    # Automatically verify/sync any pending online bookings created in the last 15 minutes
-    # This ensures that even if a customer closes their tab or loses internet during payment,
-    # the server will detect it and add it to the worker queue within 12 seconds.
+async def sync_pending_bookings():
     from datetime import datetime, timedelta
     now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
-    fifteen_mins_ago = (now_ist - timedelta(minutes=15)).isoformat()
+    # Check pending bookings created in the last 24 hours
+    twenty_four_hours_ago = (now_ist - timedelta(hours=24)).isoformat()
     
     try:
         cursor_pending = db.bookings.find(
@@ -603,7 +592,7 @@ async def queue():
             }
         )
         all_pending = await cursor_pending.to_list(100)
-        pending_list = [b for b in all_pending if b.get("created_at", "") >= fifteen_mins_ago]
+        pending_list = [b for b in all_pending if b.get("created_at", "") >= twenty_four_hours_ago]
         
         for b in pending_list:
             booking_id = b["id"]
@@ -633,6 +622,19 @@ async def queue():
     except Exception as e:
         logger.error(f"Failed to query pending bookings for auto-sync: {str(e)}")
 
+
+@api_router.get("/bookings/queue", response_model=List[Booking])
+async def queue():
+    global LAST_CLEANUP
+    import time, asyncio
+    now_ts = time.time()
+    if now_ts - LAST_CLEANUP > 43200:  # every 12 hours
+        LAST_CLEANUP = now_ts
+        asyncio.create_task(auto_cleanup_old_photos())
+
+    # Automatically verify/sync any pending online bookings created in the last 24 hours
+    await sync_pending_bookings()
+
     # Return active queued bookings (paid online or any cash bookings)
     cursor = db.bookings.find(
         {"status": "queued", "$or": [{"payment_method": "cash"}, {"payment_status": "paid"}]},
@@ -648,6 +650,10 @@ async def all_bookings(date: Optional[str] = None, pin: Optional[str] = None):
         if not pin:
             raise HTTPException(401, "PIN required for historical bookings")
         await verify_worker_or_owner_pin_or_raise(pin)
+    
+    # Sync pending bookings before retrieving list
+    await sync_pending_bookings()
+    
     q = {}
     if date:
         q["created_at"] = {"$regex": f"^{date}"}
