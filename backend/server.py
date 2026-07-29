@@ -577,8 +577,17 @@ async def auto_cleanup_old_photos():
 
 
 LAST_CLEANUP = 0
+LAST_SYNC_TIME = 0
 
 async def sync_pending_bookings():
+    global LAST_SYNC_TIME
+    import time
+    now_ts = time.time()
+    # Throttle: Only query PhonePe API status at most once every 15 seconds to make dashboard loading instant
+    if now_ts - LAST_SYNC_TIME < 15:
+        return
+    LAST_SYNC_TIME = now_ts
+
     from datetime import datetime, timedelta
     now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
     # Check pending bookings created in the last 24 hours
@@ -1113,15 +1122,18 @@ async def _payment_callback(booking_id: str):
     if not is_valid:
         raise HTTPException(400, "Payment verification failed or not completed on PhonePe")
 
+    doc = await db.bookings.find_one({"id": booking_id})
+    if doc and doc.get("payment_status") == "paid" and doc.get("token") not in ("Pending Payment", "Processing"):
+        return {"success": True, "booking": doc}
+
     # Atomic transaction step:
-    # Attempt to transition token from "Pending Payment" to "Processing"
-    # This prevents any other concurrent request from double-processing!
+    # Attempt to transition token from "Pending Payment" / "Processing" to a state ready for token generation
     modified = await db.bookings.update_one(
-        {"id": booking_id, "token": "Pending Payment"},
+        {"id": booking_id, "token": {"$in": ["Pending Payment", "Processing"]}},
         {"$set": {"token": "Processing", "payment_status": "paid", "status": "queued"}}
     )
     
-    if modified == 1:
+    if modified.modified_count == 1 or (doc and doc.get("token") == "Processing"):
         try:
             new_token = await generate_daily_token()
             await db.bookings.update_one(
@@ -1130,10 +1142,6 @@ async def _payment_callback(booking_id: str):
             )
         except Exception as e:
             logger.error(f"Failed to generate token for booking {booking_id}: {e}")
-            await db.bookings.update_one(
-                {"id": booking_id, "token": "Processing"},
-                {"$set": {"token": "Pending Payment", "payment_status": "pending", "status": "pending"}}
-            )
             raise HTTPException(500, "Token generation failed")
             
     new_doc = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
