@@ -602,6 +602,14 @@ def extract_phonepe_state(res_data: dict) -> str:
         
     return ""
 
+def is_phonepe_production() -> bool:
+    env = os.environ.get("PHONEPE_ENV", "sandbox").strip().lower()
+    client_id = os.environ.get("PHONEPE_CLIENT_ID", "").strip()
+    # If set to sandbox, or if client_id is a Sandbox ID (starts with SU), use test/sandbox mode
+    if env == "sandbox" or client_id.startswith("SU") or not client_id:
+        return False
+    return env == "production"
+
 async def sync_pending_bookings():
     global LAST_SYNC_TIME
     import time
@@ -630,16 +638,13 @@ async def sync_pending_bookings():
             booking_id = b["id"]
             client_id = os.environ.get("PHONEPE_CLIENT_ID")
             client_secret = os.environ.get("PHONEPE_CLIENT_SECRET")
-            if client_id and client_secret:
+            if not is_phonepe_production():
+                await _payment_callback(booking_id)
+            elif client_id and client_secret:
                 try:
                     token = await _get_oauth_token()
-                    env = os.environ.get("PHONEPE_ENV", "sandbox")
                     sanitized_id = booking_id.replace("-", "")
-                    if env == "production":
-                        url = f"https://api.phonepe.com/apis/pg/checkout/v2/order/{sanitized_id}/status"
-                    else:
-                        url = f"https://api-preprod.phonepe.com/apis/pg-sandbox/checkout/v2/order/{sanitized_id}/status"
-                    
+                    url = f"https://api.phonepe.com/apis/pg/checkout/v2/order/{sanitized_id}/status"
                     headers = {"Authorization": f"O-Bearer {token}"}
                     import asyncio
                     res = await asyncio.to_thread(requests.get, url, headers=headers, timeout=3)
@@ -1116,9 +1121,7 @@ async def _payment_initiate(booking_id: str, provider: str):
     }
 
 async def verify_phonepe_payment_status(booking_id: str) -> bool:
-    env = os.environ.get("PHONEPE_ENV", "sandbox")
-    # In sandbox/mock, auto-approve payment to make testing easy
-    if env != "production":
+    if not is_phonepe_production():
         return True
         
     client_id = os.environ.get("PHONEPE_CLIENT_ID")
