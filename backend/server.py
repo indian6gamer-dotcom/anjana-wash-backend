@@ -1138,11 +1138,11 @@ async def phonepe_initiate(payload: PaymentInitiateRequest):
         
     await db.bookings.update_one({"id": payload.booking_id}, {"$set": {"payment_provider": "phonepe"}})
     
-    client_id = os.environ.get("PHONEPE_CLIENT_ID")
-    client_secret = os.environ.get("PHONEPE_CLIENT_SECRET")
+    merchant_id = os.environ.get("PHONEPE_MERCHANT_ID") or os.environ.get("PHONEPE_CLIENT_ID")
+    salt_key = os.environ.get("PHONEPE_SALT_KEY") or os.environ.get("PHONEPE_CLIENT_SECRET")
     
-    if not client_id or not client_secret:
-        raise HTTPException(400, "PhonePe client credentials are not configured in environment variables.")
+    if not merchant_id or not salt_key:
+        raise HTTPException(400, "PhonePe credentials are not configured in environment variables.")
         
     checkout_url = await _phonepe_initiate_real(payload.booking_id, doc["price"], doc["phone"])
     return {
