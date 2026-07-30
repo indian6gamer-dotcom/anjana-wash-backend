@@ -493,7 +493,7 @@ def check_booking_rate_limit(ip: str) -> bool:
 
 @api_router.post("/bookings", response_model=Booking)
 async def create_booking(payload: BookingCreate, request: Request):
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = request.client.host if request and request.client else "unknown"
     if not check_booking_rate_limit(client_ip):
         raise HTTPException(429, "Too many bookings created. Please wait a minute.")
     if payload.payment_method not in ("cash", "online"):
@@ -601,6 +601,8 @@ def extract_phonepe_state(res_data: dict) -> str:
         return "FAILED"
         
     return ""
+
+LAST_SYNC_TIME = 0
 
 def is_phonepe_production() -> bool:
     env = os.environ.get("PHONEPE_ENV", "sandbox").strip().lower()
