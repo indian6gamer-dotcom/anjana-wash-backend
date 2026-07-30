@@ -1164,10 +1164,38 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 
+async def background_payment_sync_loop():
+    import asyncio
+    logger.info("Starting background PhonePe payment sync loop (3s interval)...")
+    while True:
+        try:
+            cursor_pending = db.bookings.find(
+                {
+                    "payment_method": "online",
+                    "payment_status": "pending"
+                }
+            )
+            all_pending = await cursor_pending.to_list(100)
+            for b in all_pending:
+                booking_id = b["id"]
+                try:
+                    is_valid = await verify_phonepe_payment_status(booking_id)
+                    if is_valid:
+                        logger.info(f"[Auto Sync Loop] Payment verified for {booking_id}. Generating token...")
+                        await _payment_callback(booking_id)
+                except Exception as ex:
+                    logger.error(f"[Auto Sync Loop] Error verifying {booking_id}: {ex}")
+        except Exception as e:
+            logger.error(f"[Auto Sync Loop] Loop error: {e}")
+        await asyncio.sleep(3)
+
+
 @app.on_event("startup")
 async def startup_event():
     await init_config()
     await init_services()
+    import asyncio
+    asyncio.create_task(background_payment_sync_loop())
     await migrate_legacy_bookings()
 
 
