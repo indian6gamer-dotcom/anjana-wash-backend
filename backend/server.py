@@ -577,7 +577,30 @@ async def auto_cleanup_old_photos():
 
 
 LAST_CLEANUP = 0
-LAST_SYNC_TIME = 0
+def extract_phonepe_state(res_data: dict) -> str:
+    if not isinstance(res_data, dict):
+        return ""
+    
+    # 1. Direct top-level fields
+    state = res_data.get("state") or res_data.get("status") or res_data.get("paymentState")
+    if state and isinstance(state, str):
+        return state.upper()
+        
+    # 2. Check inside "data" sub-object
+    data_obj = res_data.get("data")
+    if isinstance(data_obj, dict):
+        d_state = data_obj.get("state") or data_obj.get("status") or data_obj.get("paymentState")
+        if d_state and isinstance(d_state, str):
+            return d_state.upper()
+            
+    # 3. Check "code" field
+    code = res_data.get("code")
+    if code in ("PAYMENT_SUCCESS", "SUCCESS", "COMPLETED"):
+        return "COMPLETED"
+    elif code in ("PAYMENT_ERROR", "PAYMENT_DECLINED", "CANCELLED", "EXPIRED"):
+        return "FAILED"
+        
+    return ""
 
 async def sync_pending_bookings():
     global LAST_SYNC_TIME
@@ -621,7 +644,7 @@ async def sync_pending_bookings():
                     res = requests.get(url, headers=headers, timeout=3)
                     if res.status_code == 200:
                         res_data = res.json()
-                        state = res_data.get("state") or res_data.get("status")
+                        state = extract_phonepe_state(res_data)
                         if state == "COMPLETED":
                             await _payment_callback(booking_id)
                         elif state in ("FAILED", "EXPIRED", "CANCELLED"):
@@ -703,8 +726,8 @@ async def get_booking(booking_id: str):
                     res = requests.get(url, headers=headers, timeout=5)
                     res_data = res.json()
                     
-                    # Check status: PhonePe V2 status is typically in res_data.get("state")
-                    state = res_data.get("state") or res_data.get("status")
+                    # Check status using extract_phonepe_state
+                    state = extract_phonepe_state(res_data)
                     if state == "COMPLETED":
                         await _payment_callback(booking_id)
                         doc = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
@@ -1107,10 +1130,9 @@ async def verify_phonepe_payment_status(booking_id: str) -> bool:
             "Authorization": f"O-Bearer {token}"
         }
         import requests
-        res = requests.get(url, headers=headers, timeout=5)
         if res.status_code == 200:
             res_data = res.json()
-            state = res_data.get("state") or res_data.get("status")
+            state = extract_phonepe_state(res_data)
             return state == "COMPLETED"
     except Exception as e:
         logger.error(f"Error checking PhonePe payment status for verification: {e}")
