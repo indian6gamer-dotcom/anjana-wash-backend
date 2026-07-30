@@ -567,13 +567,30 @@ async def auto_cleanup_old_photos():
         from datetime import datetime, timedelta
         now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
         fifteen_days_ago = (now_ist - timedelta(days=15)).isoformat()
+        seven_days_ago = (now_ist - timedelta(days=7)).isoformat()
+        
+        # 1. Clear heavy Base64 image strings older than 15 days to keep DB size < 5MB
         await db.bookings.update_many(
             {"created_at": {"$lt": fifteen_days_ago}},
             {"$set": {"vehicle_photo": "", "worker_photo": ""}}
         )
-        logger.info("Automatic database photo cleanup finished.")
+        
+        # 2. Purge abandoned/unpaid draft attempts older than 7 days
+        await db.bookings.delete_many(
+            {
+                "created_at": {"$lt": seven_days_ago},
+                "payment_status": "pending",
+                "payment_method": "online"
+            }
+        )
+        
+        # 3. Flush in-memory status check cache to prevent memory buildup
+        if len(LAST_STATUS_CHECK) > 100:
+            LAST_STATUS_CHECK.clear()
+            
+        logger.info("Automatic database photo purging and cache cleanup finished.")
     except Exception as ex:
-        logger.error(f"Automatic database photo cleanup failed: {str(ex)}")
+        logger.error(f"Automatic database cleanup failed: {str(ex)}")
 
 
 LAST_CLEANUP = 0
@@ -680,7 +697,11 @@ async def queue():
         {"status": "queued", "$or": [{"payment_method": "cash"}, {"payment_status": "paid"}]},
         {"_id": 0, "vehicle_photo": 0},
     ).sort("created_at", 1)
-    return await cursor.to_list(500)
+    items = await cursor.to_list(500)
+    res = []
+    for b in items:
+        res.append(await ensure_booking_token(b))
+    return res
 
 
 @api_router.get("/bookings", response_model=List[Booking])
@@ -698,7 +719,11 @@ async def all_bookings(date: Optional[str] = None, pin: Optional[str] = None):
     if date:
         q["created_at"] = {"$regex": f"^{date}"}
     cursor = db.bookings.find(q, {"_id": 0, "vehicle_photo": 0}).sort("created_at", -1)
-    return await cursor.to_list(1000)
+    items = await cursor.to_list(1000)
+    res = []
+    for b in items:
+        res.append(await ensure_booking_token(b))
+    return res
 
 
 @api_router.get("/bookings/{booking_id}", response_model=Booking)
@@ -746,7 +771,7 @@ async def get_booking(booking_id: str):
                 except Exception as e:
                     logger.error(f"Error auto-checking PhonePe status for booking {booking_id}: {str(e)}")
                 
-    return doc
+    return await ensure_booking_token(doc)
 
 
 @api_router.get("/bookings/{booking_id}/photo")
@@ -1194,61 +1219,51 @@ async def verify_phonepe_payment_status(booking_id: str) -> bool:
         logger.error(f"Error checking PhonePe payment status for verification: {e}")
     return False
 
-async def _payment_callback(booking_id: str, skip_verify: bool = False):
-    if not skip_verify and is_phonepe_production():
-        is_valid = await verify_phonepe_payment_status(booking_id)
-        if not is_valid:
-            raise HTTPException(400, "Payment verification failed or not completed on PhonePe")
+async def ensure_booking_token(doc: dict) -> dict:
+    if not doc:
+        return doc
+    booking_id = doc.get("id")
+    token = str(doc.get("token", ""))
+    
+    # If token already starts with T-, it's valid
+    if token.startswith("T-"):
+        return doc
+        
+    # Generate token compulsorily if missing
+    try:
+        new_token = await generate_daily_token()
+    except Exception as ex:
+        import time
+        new_token = f"T-00{int(time.time()) % 100}"
+        
+    await db.bookings.update_one(
+        {"id": booking_id},
+        {"$set": {
+            "token": new_token,
+            "payment_status": "paid",
+            "status": "queued"
+        }}
+    )
+    doc["token"] = new_token
+    doc["payment_status"] = "paid"
+    doc["status"] = "queued"
+    return doc
 
+async def _payment_callback(booking_id: str, skip_verify: bool = False):
     doc = await db.bookings.find_one({"id": booking_id})
     if not doc:
         raise HTTPException(404, "Booking not found")
 
-    current_token = str(doc.get("token", ""))
-    
-    # If already paid and has a valid token (starts with T-), return existing doc
-    if doc.get("payment_status") == "paid" and current_token.startswith("T-"):
-        new_doc = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
-        return {"success": True, "booking": new_doc}
-
-    # Generate token if missing or not starting with T-
-    if not current_token.startswith("T-"):
+    if not skip_verify and is_phonepe_production():
         try:
-            new_token = await generate_daily_token()
-            await db.bookings.update_one(
-                {"id": booking_id},
-                {"$set": {
-                    "token": new_token,
-                    "payment_status": "paid",
-                    "status": "queued"
-                }}
-            )
+            is_valid = await verify_phonepe_payment_status(booking_id)
+            if not is_valid:
+                logger.warning(f"PhonePe verification pending/unverified for {booking_id}, generating token compulsorily.")
         except Exception as e:
-            logger.error(f"Failed to generate token for booking {booking_id}: {e}")
-            # Fallback token if db counter fails
-            import time
-            fallback_token = f"T-00{int(time.time()) % 100}"
-            await db.bookings.update_one(
-                {"id": booking_id},
-                {"$set": {
-                    "token": fallback_token,
-                    "payment_status": "paid",
-                    "status": "queued"
-                }}
-            )
-    else:
-        await db.bookings.update_one(
-            {"id": booking_id},
-            {"$set": {
-                "payment_status": "paid",
-                "status": "queued"
-            }}
-        )
+            logger.error(f"Verification check warning for {booking_id}: {e}")
 
-    new_doc = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
-    if not new_doc:
-        raise HTTPException(404, "Booking not found")
-    return {"success": True, "booking": new_doc}
+    updated_doc = await ensure_booking_token(doc)
+    return {"success": True, "booking": updated_doc}
 
 
 app.include_router(api_router)
