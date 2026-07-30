@@ -1078,16 +1078,6 @@ async def phonepe_initiate(payload: PaymentInitiateRequest):
         
     await db.bookings.update_one({"id": payload.booking_id}, {"$set": {"payment_provider": "phonepe"}})
     
-    if not is_phonepe_production():
-        return {
-            "success": True,
-            "checkout_url": f"/phonepe-mock?booking_id={payload.booking_id}",
-            "merchant_order_id": payload.booking_id,
-            "amount": doc["price"],
-            "provider": "phonepe",
-            "mocked": True,
-        }
-
     client_id = os.environ.get("PHONEPE_CLIENT_ID")
     client_secret = os.environ.get("PHONEPE_CLIENT_SECRET")
     
@@ -1106,35 +1096,17 @@ async def phonepe_initiate(payload: PaymentInitiateRequest):
 
 @api_router.post("/payment/phonepe/callback")
 async def phonepe_callback(payload: PaymentInitiateRequest):
-    return await _payment_callback(payload.booking_id, skip_verify=True)
+    return await _payment_callback(payload.booking_id)
 
 @api_router.post("/payment/gpay/initiate")
 async def gpay_initiate(payload: PaymentInitiateRequest):
-    return await _payment_initiate(payload.booking_id, provider="gpay")
+    return await phonepe_initiate(payload)
 
 @api_router.post("/payment/gpay/callback")
 async def gpay_callback(payload: PaymentInitiateRequest):
-    return await _payment_callback(payload.booking_id, skip_verify=True)
-
-async def _payment_initiate(booking_id: str, provider: str):
-    doc = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
-    if not doc:
-        raise HTTPException(404, "Booking not found")
-    await db.bookings.update_one({"id": booking_id}, {"$set": {"payment_provider": provider}})
-    mock_path = "/phonepe-mock" if provider == "phonepe" else "/gpay-mock"
-    return {
-        "success": True,
-        "checkout_url": f"{mock_path}?booking_id={booking_id}",
-        "merchant_order_id": booking_id,
-        "amount": doc["price"],
-        "provider": provider,
-        "mocked": True,
-    }
+    return await _payment_callback(payload.booking_id)
 
 async def verify_phonepe_payment_status(booking_id: str) -> bool:
-    if not is_phonepe_production():
-        return True
-        
     client_id = os.environ.get("PHONEPE_CLIENT_ID")
     client_secret = os.environ.get("PHONEPE_CLIENT_SECRET")
     if not client_id or not client_secret:
@@ -1143,7 +1115,12 @@ async def verify_phonepe_payment_status(booking_id: str) -> bool:
     try:
         token = await _get_oauth_token()
         sanitized_id = booking_id.replace("-", "")
-        url = f"https://api.phonepe.com/apis/pg/checkout/v2/order/{sanitized_id}/status"
+        env = os.environ.get("PHONEPE_ENV", "sandbox")
+        if env == "production":
+            url = f"https://api.phonepe.com/apis/pg/checkout/v2/order/{sanitized_id}/status"
+        else:
+            url = f"https://api-preprod.phonepe.com/apis/pg-sandbox/checkout/v2/order/{sanitized_id}/status"
+            
         headers = {
             "Authorization": f"O-Bearer {token}"
         }
