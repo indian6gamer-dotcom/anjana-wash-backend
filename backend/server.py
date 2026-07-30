@@ -850,6 +850,26 @@ async def archive_status():
     }
 
 
+@api_router.post("/owner/clear-today-tokens")
+async def clear_today_tokens_endpoint(req: OwnerActionRequest):
+    await verify_owner_pin_or_raise(req.pin)
+    today = today_key()
+    cursor = db.bookings.find({})
+    all_b = await cursor.to_list(10000)
+    today_b = [b for b in all_b if b.get("created_at", "").startswith(today)]
+    
+    count = 0
+    for b in today_b:
+        await db.bookings.delete_one({"id": b["id"]})
+        count += 1
+        
+    await db.counters.find_one_and_update(
+        {"_id": f"token-{today}"},
+        {"$set": {"seq": 0}},
+        upsert=True
+    )
+    return {"success": True, "deleted_count": count, "message": f"Cleared {count} bookings and reset token counter for today."}
+
 @api_router.get("/bookings/archive/download")
 async def download_archive(owner_pin: str, all: bool = False):
     await verify_owner_pin_or_raise(owner_pin)
@@ -1032,6 +1052,46 @@ async def _phonepe_initiate_real(booking_id: str, amount_rupees: int, phone: str
     env = os.environ.get("PHONEPE_ENV", "sandbox")
     frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:3000")
     
+    merchant_id = os.environ.get("PHONEPE_MERCHANT_ID")
+    salt_key = os.environ.get("PHONEPE_SALT_KEY")
+    salt_index = os.environ.get("PHONEPE_SALT_INDEX", "1")
+
+    # If V1 credentials (Merchant ID & Salt Key) are provided, use PhonePe V1 SHA256 API
+    if merchant_id and salt_key:
+        import base64, hashlib, json, asyncio
+        amount_paise = int(amount_rupees * 100)
+        payload_dict = {
+            "merchantId": merchant_id,
+            "merchantTransactionId": booking_id.replace("-", ""),
+            "merchantUserId": "MUID" + booking_id[:8].replace("-", ""),
+            "amount": amount_paise,
+            "redirectUrl": f"{frontend_url}/token/{booking_id}",
+            "redirectMode": "REDIRECT",
+            "callbackUrl": f"{frontend_url}/token/{booking_id}",
+            "paymentInstrument": {"type": "PAY_PAGE"}
+        }
+        json_bytes = json.dumps(payload_dict).encode("utf-8")
+        base64_payload = base64.b64encode(json_bytes).decode("utf-8")
+        string_to_hash = base64_payload + "/pg/v1/pay" + salt_key
+        sha256_hash = hashlib.sha256(string_to_hash.encode("utf-8")).hexdigest()
+        x_verify = f"{sha256_hash}###{salt_index}"
+        
+        url = "https://api.phonepe.com/apis/hermes/pg/v1/pay" if env == "production" else "https://api-preprod.phonepe.com/apis/pg-sandbox/pg/v1/pay"
+        headers = {
+            "Content-Type": "application/json",
+            "X-VERIFY": x_verify
+        }
+        try:
+            response = await asyncio.to_thread(requests.post, url, json={"request": base64_payload}, headers=headers, timeout=10)
+            res_data = response.json()
+            if res_data.get("success") and "url" in res_data.get("data", {}).get("instrumentResponse", {}).get("redirectInfo", {}):
+                return res_data["data"]["instrumentResponse"]["redirectInfo"]["url"]
+            elif "redirectUrl" in res_data:
+                return res_data["redirectUrl"]
+        except Exception as e:
+            logger.error(f"PhonePe V1 initiation failed: {e}")
+
+    # PhonePe V2 OAuth API
     token = await _get_oauth_token()
     amount_paise = int(amount_rupees * 100)
     
