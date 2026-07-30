@@ -632,7 +632,7 @@ async def sync_pending_bookings():
             client_secret = os.environ.get("PHONEPE_CLIENT_SECRET")
             if client_id and client_secret:
                 try:
-                    token = _get_oauth_token()
+                    token = await _get_oauth_token()
                     env = os.environ.get("PHONEPE_ENV", "sandbox")
                     sanitized_id = booking_id.replace("-", "")
                     if env == "production":
@@ -641,7 +641,8 @@ async def sync_pending_bookings():
                         url = f"https://api-preprod.phonepe.com/apis/pg-sandbox/checkout/v2/order/{sanitized_id}/status"
                     
                     headers = {"Authorization": f"O-Bearer {token}"}
-                    res = requests.get(url, headers=headers, timeout=3)
+                    import asyncio
+                    res = await asyncio.to_thread(requests.get, url, headers=headers, timeout=3)
                     if res.status_code == 200:
                         res_data = res.json()
                         state = extract_phonepe_state(res_data)
@@ -710,7 +711,7 @@ async def get_booking(booking_id: str):
             client_secret = os.environ.get("PHONEPE_CLIENT_SECRET")
             if client_id and client_secret:
                 try:
-                    token = _get_oauth_token()
+                    token = await _get_oauth_token()
                     env = os.environ.get("PHONEPE_ENV", "sandbox")
                     
                     sanitized_id = booking_id.replace("-", "")
@@ -723,7 +724,8 @@ async def get_booking(booking_id: str):
                         "Authorization": f"O-Bearer {token}"
                     }
                     
-                    res = requests.get(url, headers=headers, timeout=5)
+                    import asyncio
+                    res = await asyncio.to_thread(requests.get, url, headers=headers, timeout=5)
                     res_data = res.json()
                     
                     # Check status using extract_phonepe_state
@@ -973,7 +975,7 @@ OAUTH_TOKEN_CACHE = {
     "expires_at": 0
 }
 
-def _get_oauth_token():
+async def _get_oauth_token():
     import time
     now = time.time()
     if OAUTH_TOKEN_CACHE["token"] and OAUTH_TOKEN_CACHE["expires_at"] > now:
@@ -1004,7 +1006,8 @@ def _get_oauth_token():
     encoded_data = urllib.parse.urlencode(data)
     
     try:
-        response = requests.post(url, data=encoded_data, headers=headers, timeout=10)
+        import asyncio
+        response = await asyncio.to_thread(requests.post, url, data=encoded_data, headers=headers, timeout=10)
         res_json = response.json()
     except Exception as e:
         logger.error(f"PhonePe OAuth network/json error: {str(e)}")
@@ -1022,7 +1025,7 @@ async def _phonepe_initiate_real(booking_id: str, amount_rupees: int, phone: str
     env = os.environ.get("PHONEPE_ENV", "sandbox")
     frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:3000")
     
-    token = _get_oauth_token()
+    token = await _get_oauth_token()
     amount_paise = int(amount_rupees * 100)
     
     payload = {
@@ -1047,7 +1050,8 @@ async def _phonepe_initiate_real(booking_id: str, amount_rupees: int, phone: str
     }
     
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        import asyncio
+        response = await asyncio.to_thread(requests.post, url, json=payload, headers=headers, timeout=10)
         res_data = response.json()
     except Exception as e:
         raise HTTPException(500, f"Failed to connect to PhonePe: {str(e)}")
@@ -1123,13 +1127,14 @@ async def verify_phonepe_payment_status(booking_id: str) -> bool:
         return False
         
     try:
-        token = _get_oauth_token()
+        token = await _get_oauth_token()
         sanitized_id = booking_id.replace("-", "")
         url = f"https://api.phonepe.com/apis/pg/checkout/v2/order/{sanitized_id}/status"
         headers = {
             "Authorization": f"O-Bearer {token}"
         }
-        import requests
+        import requests, asyncio
+        res = await asyncio.to_thread(requests.get, url, headers=headers, timeout=5)
         if res.status_code == 200:
             res_data = res.json()
             state = extract_phonepe_state(res_data)
