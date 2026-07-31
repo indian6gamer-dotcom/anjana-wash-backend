@@ -633,15 +633,14 @@ async def sync_pending_bookings():
     global LAST_SYNC_TIME
     import time
     now_ts = time.time()
-    # Throttle: Only query PhonePe API status at most once every 15 seconds to make dashboard loading instant
-    if now_ts - LAST_SYNC_TIME < 15:
+    if now_ts - LAST_SYNC_TIME < 10:
         return
     LAST_SYNC_TIME = now_ts
 
     from datetime import datetime, timedelta
     now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
-    # Check pending bookings created in the last 24 hours
     twenty_four_hours_ago = (now_ist - timedelta(hours=24)).isoformat()
+    thirty_mins_ago = (now_ist - timedelta(minutes=30)).isoformat()
     
     try:
         cursor_pending = db.bookings.find(
@@ -655,27 +654,21 @@ async def sync_pending_bookings():
         
         for b in pending_list:
             booking_id = b["id"]
-            client_id = os.environ.get("PHONEPE_CLIENT_ID")
-            client_secret = os.environ.get("PHONEPE_CLIENT_SECRET")
-            if not is_phonepe_production():
-                await _payment_callback(booking_id)
-            elif client_id and client_secret:
-                try:
-                    token = await _get_oauth_token()
-                    sanitized_id = booking_id.replace("-", "")
-                    url = f"https://api.phonepe.com/apis/pg/checkout/v2/order/{sanitized_id}/status"
-                    headers = {"Authorization": f"O-Bearer {token}"}
-                    import asyncio
-                    res = await asyncio.to_thread(requests.get, url, headers=headers, timeout=3)
-                    if res.status_code == 200:
-                        res_data = res.json()
-                        state = extract_phonepe_state(res_data)
-                        if state == "COMPLETED":
-                            await _payment_callback(booking_id)
-                        elif state in ("FAILED", "EXPIRED", "CANCELLED"):
-                            await db.bookings.delete_one({"id": booking_id})
-                except Exception as ex:
-                    logger.error(f"Background PhonePe sync failed for {booking_id}: {str(ex)}")
+            created_at = b.get("created_at", "")
+            
+            # Check PhonePe API status strictly - NEVER auto-approve pending
+            try:
+                is_valid = await verify_phonepe_payment_status(booking_id)
+                if is_valid:
+                    await _payment_callback(booking_id, skip_verify=True)
+                elif created_at < thirty_mins_ago:
+                    # Timeout unpaid attempt after 30 mins
+                    await db.bookings.update_one(
+                        {"id": booking_id},
+                        {"$set": {"payment_status": "failed", "status": "failed"}}
+                    )
+            except Exception as ex:
+                logger.error(f"Background PhonePe sync error for {booking_id}: {str(ex)}")
     except Exception as e:
         logger.error(f"Failed to query pending bookings for auto-sync: {str(e)}")
 
@@ -689,18 +682,28 @@ async def queue():
         LAST_CLEANUP = now_ts
         asyncio.create_task(auto_cleanup_old_photos())
 
-    # Automatically verify/sync any pending online bookings created in the last 24 hours
+    # Sync pending online bookings strictly against PhonePe API
     await sync_pending_bookings()
 
-    # Return active queued bookings (paid online or any cash bookings)
+    # Return ONLY active queued bookings that are PAID online or Cash
     cursor = db.bookings.find(
-        {"status": "queued", "$or": [{"payment_method": "cash"}, {"payment_status": "paid"}]},
+        {
+            "status": "queued",
+            "$or": [
+                {"payment_method": "cash"},
+                {"payment_method": "online", "payment_status": "paid"}
+            ]
+        },
         {"_id": 0, "vehicle_photo": 0},
     ).sort("created_at", 1)
     items = await cursor.to_list(500)
     res = []
     for b in items:
-        res.append(await ensure_booking_token(b))
+        # Only return bookings that have a valid generated token starting with T-
+        if b.get("token", "").startswith("T-"):
+            res.append(b)
+        elif b.get("payment_status") == "paid" or b.get("payment_method") == "cash":
+            res.append(await ensure_booking_token(b))
     return res
 
 
