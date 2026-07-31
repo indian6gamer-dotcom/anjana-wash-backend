@@ -1224,29 +1224,32 @@ async def ensure_booking_token(doc: dict) -> dict:
         return doc
     booking_id = doc.get("id")
     token = str(doc.get("token", ""))
+    payment_status = doc.get("payment_status", "")
+    payment_method = doc.get("payment_method", "")
     
     # If token already starts with T-, it's valid
     if token.startswith("T-"):
         return doc
         
-    # Generate token compulsorily if missing
-    try:
-        new_token = await generate_daily_token()
-    except Exception as ex:
-        import time
-        new_token = f"T-00{int(time.time()) % 100}"
-        
-    await db.bookings.update_one(
-        {"id": booking_id},
-        {"$set": {
-            "token": new_token,
-            "payment_status": "paid",
-            "status": "queued"
-        }}
-    )
-    doc["token"] = new_token
-    doc["payment_status"] = "paid"
-    doc["status"] = "queued"
+    # Strictly ONLY generate token if payment is paid OR cash
+    if payment_status == "paid" or payment_method == "cash":
+        try:
+            new_token = await generate_daily_token()
+        except Exception as ex:
+            import time
+            new_token = f"T-00{int(time.time()) % 100}"
+            
+        await db.bookings.update_one(
+            {"id": booking_id},
+            {"$set": {
+                "token": new_token,
+                "payment_status": "paid",
+                "status": "queued"
+            }}
+        )
+        doc["token"] = new_token
+        doc["payment_status"] = "paid"
+        doc["status"] = "queued"
     return doc
 
 async def _payment_callback(booking_id: str, skip_verify: bool = False):
@@ -1258,9 +1261,26 @@ async def _payment_callback(booking_id: str, skip_verify: bool = False):
         try:
             is_valid = await verify_phonepe_payment_status(booking_id)
             if not is_valid:
-                logger.warning(f"PhonePe verification pending/unverified for {booking_id}, generating token compulsorily.")
+                # Mark as failed in DB and DO NOT generate token!
+                await db.bookings.update_one(
+                    {"id": booking_id},
+                    {"$set": {"payment_status": "failed", "status": "failed"}}
+                )
+                doc["payment_status"] = "failed"
+                doc["status"] = "failed"
+                raise HTTPException(400, "Payment failed or cancelled on PhonePe")
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.error(f"Verification check warning for {booking_id}: {e}")
+            logger.error(f"Verification check error for {booking_id}: {e}")
+
+    # Mark as paid and generate token strictly on success
+    await db.bookings.update_one(
+        {"id": booking_id},
+        {"$set": {"payment_status": "paid", "status": "queued"}}
+    )
+    doc["payment_status"] = "paid"
+    doc["status"] = "queued"
 
     updated_doc = await ensure_booking_token(doc)
     return {"success": True, "booking": updated_doc}
