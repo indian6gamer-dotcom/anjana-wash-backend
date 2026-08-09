@@ -45,7 +45,7 @@ const formatDateLabel = (dateStr) => {
 };
 
 export default function Owner() {
-  const [stats, setStats] = useState(null);
+  const [stats, setStats] = useState({ total_earnings: 0, cash_amount: 0, online_amount: 0, total_washes: 0, daily_breakdown: [] });
   const [bookings, setBookings] = useState([]);
   const [showPinMgr, setShowPinMgr] = useState(false);
   const [showSvcMgr, setShowSvcMgr] = useState(false);
@@ -82,16 +82,14 @@ export default function Owner() {
 
   useEffect(() => { load(); const t = setInterval(load, 8000); return () => clearInterval(t); }, [load]);
 
-  if (!stats) return <div className="p-10 text-center text-muted-foreground">Loading…</div>;
-
   const past15Days = getPast15Days();
   const now = new Date();
   const istTime = new Date(now.getTime() + (5.5 * 60 * 60 * 1000));
   const todayStr = istTime.toISOString().split("T")[0];
 
   const completed = bookings.filter((b) => {
-    if (b.status !== "completed") return false;
-    const createdDate = b.created_at.split("T")[0];
+    if (!b || b.status !== "completed") return false;
+    const createdDate = b.created_at ? b.created_at.split("T")[0] : "";
     if (!past15Days.includes(createdDate)) return false;
     if (selectedDate === "all") return true;
     return createdDate === selectedDate;
@@ -99,22 +97,23 @@ export default function Owner() {
 
   const isAll = selectedDate === "all";
   const filteredBookingsForStats = bookings.filter((b) => {
-    const createdDate = b.created_at.split("T")[0];
+    if (!b) return false;
+    const createdDate = b.created_at ? b.created_at.split("T")[0] : "";
     if (isAll) {
       return createdDate === todayStr;
     }
     return createdDate === selectedDate;
   });
 
-  const completedForStats = filteredBookingsForStats.filter((b) => b.status === "completed");
-  const pendingForStats = filteredBookingsForStats.filter((b) => b.status === "queued");
+  const completedForStats = filteredBookingsForStats.filter((b) => b && b.status === "completed");
+  const pendingForStats = filteredBookingsForStats.filter((b) => b && b.status === "queued");
   
-  const paidCash = filteredBookingsForStats.filter((b) => b.payment_status === "paid" && b.payment_method === "cash");
-  const paidOnline = filteredBookingsForStats.filter((b) => b.payment_status === "paid" && b.payment_method === "online");
+  const paidCash = filteredBookingsForStats.filter((b) => b && b.payment_status === "paid" && b.payment_method === "cash");
+  const paidOnline = filteredBookingsForStats.filter((b) => b && b.payment_status === "paid" && b.payment_method === "online");
 
-  const dynamicTotalEarnings = paidCash.reduce((sum, b) => sum + b.price, 0) + paidOnline.reduce((sum, b) => sum + b.price, 0);
-  const dynamicCashAmount = paidCash.reduce((sum, b) => sum + b.price, 0);
-  const dynamicOnlineAmount = paidOnline.reduce((sum, b) => sum + b.price, 0);
+  const dynamicTotalEarnings = paidCash.reduce((sum, b) => sum + (b.price || 0), 0) + paidOnline.reduce((sum, b) => sum + (b.price || 0), 0);
+  const dynamicCashAmount = paidCash.reduce((sum, b) => sum + (b.price || 0), 0);
+  const dynamicOnlineAmount = paidOnline.reduce((sum, b) => sum + (b.price || 0), 0);
 
   const dynamicCashCount = paidCash.length;
   const dynamicOnlineCount = paidOnline.length;
@@ -123,7 +122,7 @@ export default function Owner() {
   const dynamicTotalBookings = filteredBookingsForStats.length;
 
   const pendingPayments = bookings.filter(
-    (b) => b.payment_method === "online" && b.payment_status === "pending" && b.status === "queued"
+    (b) => b && b.payment_method === "online" && b.payment_status === "pending" && b.status === "queued"
   );
 
   const getLabelSuffix = () => {
@@ -141,7 +140,8 @@ export default function Owner() {
 
   const groupedCompletions = [];
   completed.slice(0, 100).forEach((b) => {
-    const createdDate = b.created_at.split("T")[0];
+    if (!b) return;
+    const createdDate = b.created_at ? b.created_at.split("T")[0] : "";
     let group = groupedCompletions.find((g) => g.date === createdDate);
     if (!group) {
       group = { date: createdDate, items: [] };
