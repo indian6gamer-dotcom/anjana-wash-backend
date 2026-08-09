@@ -17,20 +17,29 @@ from datetime import datetime, timezone, timedelta
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
+MONGO_URL = os.environ.get("MONGO_URL") or os.environ.get("MONGODB_URI")
 DATABASE_URL = os.environ.get("DATABASE_URL")
-if DATABASE_URL:
+
+if MONGO_URL or (DATABASE_URL and ("mongodb://" in DATABASE_URL or "mongodb+srv://" in DATABASE_URL)):
+    m_url = MONGO_URL or DATABASE_URL
+    import motor.motor_asyncio
+    mongo_client = motor.motor_asyncio.AsyncIOMotorClient(m_url)
+    db = mongo_client.get_database("anjana_wash")
+    client = db
+elif DATABASE_URL and ("postgresql://" in DATABASE_URL or "postgres://" in DATABASE_URL):
     try:
         from backend.postgres_db import PostgresDB
     except ModuleNotFoundError:
         from postgres_db import PostgresDB
     db = PostgresDB(DATABASE_URL)
+    client = db
 else:
     try:
         from backend.sqlite_db import SQLiteDB
     except ModuleNotFoundError:
         from sqlite_db import SQLiteDB
     db = SQLiteDB(str(ROOT_DIR / 'anjana_clean.db'))
-client = db
+    client = db
 
 app = FastAPI(title="Anjana Wash API")
 api_router = APIRouter(prefix="/api")
@@ -694,7 +703,7 @@ async def queue():
                 {"payment_method": "online", "payment_status": "paid"}
             ]
         },
-        {"_id": 0, "vehicle_photo": 0},
+        {"_id": 0, "vehicle_photo": 0, "worker_photo": 0},
     ).sort("created_at", 1)
     items = await cursor.to_list(500)
     res = []
@@ -721,7 +730,7 @@ async def all_bookings(date: Optional[str] = None, pin: Optional[str] = None):
     q = {}
     if date:
         q["created_at"] = {"$regex": f"^{date}"}
-    cursor = db.bookings.find(q, {"_id": 0, "vehicle_photo": 0}).sort("created_at", -1)
+    cursor = db.bookings.find(q, {"_id": 0, "vehicle_photo": 0, "worker_photo": 0}).sort("created_at", -1)
     items = await cursor.to_list(1000)
     res = []
     for b in items:
@@ -1260,7 +1269,7 @@ async def _payment_callback(booking_id: str, skip_verify: bool = False):
     if not doc:
         raise HTTPException(404, "Booking not found")
 
-    if not skip_verify and is_phonepe_production():
+    if not skip_verify:
         try:
             is_valid = await verify_phonepe_payment_status(booking_id)
             if not is_valid:
@@ -1276,6 +1285,13 @@ async def _payment_callback(booking_id: str, skip_verify: bool = False):
             raise
         except Exception as e:
             logger.error(f"Verification check error for {booking_id}: {e}")
+            await db.bookings.update_one(
+                {"id": booking_id},
+                {"$set": {"payment_status": "failed", "status": "failed"}}
+            )
+            doc["payment_status"] = "failed"
+            doc["status"] = "failed"
+            raise HTTPException(400, "Payment verification failed or pending")
 
     # Mark as paid and generate token strictly on success
     await db.bookings.update_one(
