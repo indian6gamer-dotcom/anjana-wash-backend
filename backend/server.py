@@ -1347,11 +1347,23 @@ async def background_payment_sync_loop():
 
 @app.on_event("startup")
 async def startup_event():
-    await init_config()
-    await init_services()
     import asyncio
-    asyncio.create_task(background_payment_sync_loop())
-    await migrate_legacy_bookings()
+    async def safe_startup():
+        try:
+            await init_config()
+        except Exception as e:
+            logger.error(f"init_config error: {e}")
+        try:
+            await init_services()
+        except Exception as e:
+            logger.error(f"init_services error: {e}")
+        try:
+            await migrate_legacy_bookings()
+        except Exception as e:
+            logger.error(f"migrate_legacy_bookings error: {e}")
+        asyncio.create_task(background_payment_sync_loop())
+
+    asyncio.create_task(safe_startup())
 
 
 @app.on_event("shutdown")
