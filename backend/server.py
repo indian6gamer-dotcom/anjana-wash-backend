@@ -39,6 +39,7 @@ if MONGO_URL or (DATABASE_URL and ("mongodb://" in DATABASE_URL or "mongodb+srv:
     kwargs = {
         "tls": True,
         "tlsAllowInvalidCertificates": True,
+        "tlsAllowInvalidHostnames": True,
         "serverSelectionTimeoutMS": 10000
     }
     if ca_file:
