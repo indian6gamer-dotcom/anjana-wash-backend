@@ -25,14 +25,9 @@ if MONGO_URL or (DATABASE_URL and ("mongodb://" in DATABASE_URL or "mongodb+srv:
     if "<db_password>" in m_url or "<password>" in m_url:
         m_url = m_url.replace("<db_password>", "DKnbPlmCNGUlebsc").replace("<password>", "DKnbPlmCNGUlebsc")
     
-    for conflict in ["&tlsAllowInvalidCertificates=true", "tlsAllowInvalidCertificates=true&", "tlsAllowInvalidCertificates=true"]:
-        m_url = m_url.replace(conflict, "")
-        
-    if "tlsInsecure" not in m_url:
-        if "?" in m_url:
-            m_url += "&tlsInsecure=true"
-        else:
-            m_url += "/anjana_wash?retryWrites=true&w=majority&tlsInsecure=true"
+    if "?" in m_url:
+        base_part = m_url.split("?")[0]
+        m_url = base_part + "?retryWrites=true&w=majority"
 
     import motor.motor_asyncio
     try:
@@ -42,7 +37,8 @@ if MONGO_URL or (DATABASE_URL and ("mongodb://" in DATABASE_URL or "mongodb+srv:
         ca_file = None
     
     kwargs = {
-        "tlsInsecure": True,
+        "tls": True,
+        "tlsAllowInvalidCertificates": True,
         "serverSelectionTimeoutMS": 10000
     }
     if ca_file:
