@@ -437,17 +437,21 @@ async def services_by_category(category_id: str):
     results = await cursor.to_list(100)
     
     if not results and category_id in DEFAULT_SERVICE_PRICES:
-        import random
         for name, price, desc in DEFAULT_SERVICE_PRICES[category_id]:
-            svc_id = f"{category_id}_{name.lower().replace(' ', '_')}_{random.randint(100, 999)}"
-            await db.services.insert_one({
-                "id": svc_id,
-                "category_id": category_id,
-                "name": name,
-                "price": price,
-                "description": desc,
-                "active": True
-            })
+            clean_name = name.lower().replace(" ", "_").replace("+", "plus")
+            svc_id = f"{category_id}_{clean_name}"
+            await db.services.update_one(
+                {"id": svc_id},
+                {"$setOnInsert": {
+                    "id": svc_id,
+                    "category_id": category_id,
+                    "name": name,
+                    "price": price,
+                    "description": desc,
+                    "active": True
+                }},
+                upsert=True
+            )
         cursor = db.services.find({"category_id": category_id, "active": True}, {"_id": 0}).sort("price", 1)
         results = await cursor.to_list(100)
         
