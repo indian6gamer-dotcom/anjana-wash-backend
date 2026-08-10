@@ -22,6 +22,14 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 
 if MONGO_URL or (DATABASE_URL and ("mongodb://" in DATABASE_URL or "mongodb+srv://" in DATABASE_URL)):
     m_url = MONGO_URL or DATABASE_URL
+    if "<db_password>" in m_url or "<password>" in m_url:
+        m_url = m_url.replace("<db_password>", "DKnbPlmCNGUlebsc").replace("<password>", "DKnbPlmCNGUlebsc")
+    if "tlsAllowInvalidCertificates" not in m_url:
+        if "?" in m_url:
+            m_url += "&tls=true&tlsAllowInvalidCertificates=true"
+        else:
+            m_url += "/anjana_wash?retryWrites=true&w=majority&tls=true&tlsAllowInvalidCertificates=true"
+
     import motor.motor_asyncio
     try:
         import certifi
@@ -31,6 +39,7 @@ if MONGO_URL or (DATABASE_URL and ("mongodb://" in DATABASE_URL or "mongodb+srv:
     
     kwargs = {
         "tls": True,
+        "tlsInsecure": True,
         "tlsAllowInvalidCertificates": True,
         "serverSelectionTimeoutMS": 10000
     }
