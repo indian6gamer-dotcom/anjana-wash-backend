@@ -4,6 +4,8 @@ from starlette.middleware.cors import CORSMiddleware
 
 import os
 import logging
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 import io
 import zipfile
 import csv
@@ -17,30 +19,30 @@ from datetime import datetime, timezone, timedelta
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-MONGO_URL = os.environ.get("MONGO_URL") or os.environ.get("MONGODB_URI")
-DATABASE_URL = os.environ.get("DATABASE_URL")
+DEFAULT_MONGO = "mongodb+srv://indian6gamer_db_user:DKnbPlmCNGUlebsc@cluster0.rvz4vdj.mongodb.net/anjana_wash?retryWrites=true&w=majority"
+MONGO_URL = os.environ.get("MONGO_URL") or os.environ.get("MONGODB_URI") or os.environ.get("DATABASE_URL") or DEFAULT_MONGO
 
-if MONGO_URL or (DATABASE_URL and ("mongodb://" in DATABASE_URL or "mongodb+srv://" in DATABASE_URL)):
-    m_url = MONGO_URL or DATABASE_URL
-    if "<db_password>" in m_url or "<password>" in m_url:
-        m_url = m_url.replace("<db_password>", "DKnbPlmCNGUlebsc").replace("<password>", "DKnbPlmCNGUlebsc")
-    
-    if "tlsAllowInvalidCertificates" not in m_url:
-        if "?" in m_url:
-            m_url += "&tls=true&tlsAllowInvalidCertificates=true"
-        else:
-            m_url += "/anjana_wash?retryWrites=true&w=majority&tls=true&tlsAllowInvalidCertificates=true"
+if "<db_password>" in MONGO_URL or "<password>" in MONGO_URL:
+    MONGO_URL = MONGO_URL.replace("<db_password>", "DKnbPlmCNGUlebsc").replace("<password>", "DKnbPlmCNGUlebsc")
 
+if "mongodb" in MONGO_URL:
+    m_url = MONGO_URL
     import motor.motor_asyncio
-    mongo_client = motor.motor_asyncio.AsyncIOMotorClient(m_url, serverSelectionTimeoutMS=10000)
-    db = mongo_client.get_database("anjana_wash")
-    client = db
-elif DATABASE_URL and ("postgresql://" in DATABASE_URL or "postgres://" in DATABASE_URL):
+    try:
+        mongo_client = motor.motor_asyncio.AsyncIOMotorClient(m_url, tls=True, tlsAllowInvalidCertificates=True, serverSelectionTimeoutMS=10000)
+        db = mongo_client.get_database("anjana_wash")
+        client = db
+    except Exception as e:
+        logger.error(f"Failed to connect with custom MONGO_URL, falling back to default Atlas URL: {e}")
+        mongo_client = motor.motor_asyncio.AsyncIOMotorClient(DEFAULT_MONGO, tls=True, tlsAllowInvalidCertificates=True, serverSelectionTimeoutMS=10000)
+        db = mongo_client.get_database("anjana_wash")
+        client = db
+elif "postgresql" in MONGO_URL or "postgres" in MONGO_URL:
     try:
         from backend.postgres_db import PostgresDB
     except ModuleNotFoundError:
         from postgres_db import PostgresDB
-    db = PostgresDB(DATABASE_URL)
+    db = PostgresDB(MONGO_URL)
     client = db
 else:
     try:
