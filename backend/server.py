@@ -23,7 +23,12 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 if MONGO_URL or (DATABASE_URL and ("mongodb://" in DATABASE_URL or "mongodb+srv://" in DATABASE_URL)):
     m_url = MONGO_URL or DATABASE_URL
     import motor.motor_asyncio
-    mongo_client = motor.motor_asyncio.AsyncIOMotorClient(m_url)
+    mongo_client = motor.motor_asyncio.AsyncIOMotorClient(
+        m_url,
+        tls=True,
+        tlsAllowInvalidCertificates=True,
+        serverSelectionTimeoutMS=5000
+    )
     db = mongo_client.get_database("anjana_wash")
     client = db
 elif DATABASE_URL and ("postgresql://" in DATABASE_URL or "postgres://" in DATABASE_URL):
