@@ -766,7 +766,6 @@ async def all_bookings(date: Optional[str] = None, pin: Optional[str] = None):
     effective_pin = pin if pin else "9999"
     await verify_worker_or_owner_pin_or_raise(effective_pin)
     
-    # Sync pending bookings in background so response returns instantly
     import asyncio
     asyncio.create_task(sync_pending_bookings())
     
@@ -775,10 +774,10 @@ async def all_bookings(date: Optional[str] = None, pin: Optional[str] = None):
         q["created_at"] = {"$regex": f"^{date}"}
     cursor = db.bookings.find(q, {"_id": 0, "vehicle_photo": 0, "worker_photo": 0}).sort("created_at", -1)
     items = await cursor.to_list(1000)
-    res = []
     for b in items:
-        res.append(await ensure_booking_token(b))
-    return res
+        if not b.get("token"):
+            b["token"] = f"T-{str(b.get('daily_token_number', 1)).zfill(3)}"
+    return items
 
 
 @api_router.get("/bookings/{booking_id}", response_model=Booking)
