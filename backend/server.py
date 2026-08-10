@@ -25,27 +25,14 @@ if MONGO_URL or (DATABASE_URL and ("mongodb://" in DATABASE_URL or "mongodb+srv:
     if "<db_password>" in m_url or "<password>" in m_url:
         m_url = m_url.replace("<db_password>", "DKnbPlmCNGUlebsc").replace("<password>", "DKnbPlmCNGUlebsc")
     
-    if "?" in m_url:
-        base_part = m_url.split("?")[0]
-        m_url = base_part + "?retryWrites=true&w=majority"
+    if "tlsAllowInvalidCertificates" not in m_url:
+        if "?" in m_url:
+            m_url += "&tls=true&tlsAllowInvalidCertificates=true"
+        else:
+            m_url += "/anjana_wash?retryWrites=true&w=majority&tls=true&tlsAllowInvalidCertificates=true"
 
     import motor.motor_asyncio
-    try:
-        import certifi
-        ca_file = certifi.where()
-    except Exception:
-        ca_file = None
-    
-    kwargs = {
-        "tls": True,
-        "tlsAllowInvalidCertificates": True,
-        "tlsAllowInvalidHostnames": True,
-        "serverSelectionTimeoutMS": 10000
-    }
-    if ca_file:
-        kwargs["tlsCAFile"] = ca_file
-        
-    mongo_client = motor.motor_asyncio.AsyncIOMotorClient(m_url, **kwargs)
+    mongo_client = motor.motor_asyncio.AsyncIOMotorClient(m_url, serverSelectionTimeoutMS=10000)
     db = mongo_client.get_database("anjana_wash")
     client = db
 elif DATABASE_URL and ("postgresql://" in DATABASE_URL or "postgres://" in DATABASE_URL):
@@ -437,32 +424,54 @@ async def list_services():
     return await cursor.to_list(500)
 
 
+CATEGORY_ALIASES = {
+    "hatchback": "small_car",
+    "small_car": "hatchback",
+    "suv": "xuv",
+    "xuv": "suv",
+    "muv": "7seater",
+    "7seater": "muv",
+    "auto_rickshaw": "auto",
+    "auto": "auto_rickshaw",
+    "cargo_rickshaw": "ape_auto",
+    "ape_auto": "cargo_rickshaw",
+    "cargo_auto": "ape_auto",
+    "tempo_traveller": "tt",
+    "tt": "tempo_traveller",
+    "pickup": "bolero_leyland",
+    "bolero_leyland": "pickup",
+}
+
 @api_router.get("/services/by-category/{category_id}", response_model=List[Service])
 async def services_by_category(category_id: str):
-    if category_id not in LEAF_BY_ID:
-        raise HTTPException(400, "Invalid category")
-    cursor = db.services.find({"category_id": category_id, "active": True}, {"_id": 0}).sort("price", 1)
-    results = await cursor.to_list(100)
-    
-    if not results and category_id in DEFAULT_SERVICE_PRICES:
-        for name, price, desc in DEFAULT_SERVICE_PRICES[category_id]:
-            clean_name = name.lower().replace(" ", "_").replace("+", "plus")
-            svc_id = f"{category_id}_{clean_name}"
-            await db.services.update_one(
-                {"id": svc_id},
-                {"$setOnInsert": {
-                    "id": svc_id,
-                    "category_id": category_id,
-                    "name": name,
-                    "price": price,
-                    "description": desc,
-                    "active": True
-                }},
-                upsert=True
-            )
-        cursor = db.services.find({"category_id": category_id, "active": True}, {"_id": 0}).sort("price", 1)
-        results = await cursor.to_list(100)
-        
+    target_ids = [category_id]
+    if category_id in CATEGORY_ALIASES:
+        target_ids.append(CATEGORY_ALIASES[category_id])
+
+    results = []
+    try:
+        if hasattr(db, 'services') and hasattr(db.services, 'find'):
+            cursor = db.services.find({"category_id": {"$in": target_ids}, "active": True}, {"_id": 0}).sort("price", 1)
+            results = await cursor.to_list(100)
+    except Exception:
+        results = []
+
+    if not results:
+        for tid in target_ids:
+            if tid in DEFAULT_SERVICE_PRICES:
+                for name, price, desc in DEFAULT_SERVICE_PRICES[tid]:
+                    clean_name = name.lower().replace(" ", "_").replace("+", "plus")
+                    svc_id = f"{category_id}_{clean_name}"
+                    results.append(Service(
+                        id=svc_id,
+                        category_id=category_id,
+                        name=name,
+                        price=price,
+                        description=desc,
+                        active=True
+                    ))
+                break
+
     return results
 
 
