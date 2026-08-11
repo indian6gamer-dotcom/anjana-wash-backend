@@ -28,23 +28,21 @@ if "<db_password>" in MONGO_URL or "<password>" in MONGO_URL:
 if "mongodb" in MONGO_URL:
     m_url = MONGO_URL
     import motor.motor_asyncio
+    
+    kwargs = {"serverSelectionTimeoutMS": 15000}
     try:
         import certifi
-        ca_file = certifi.where()
+        kwargs["tlsCAFile"] = certifi.where()
     except Exception:
-        ca_file = None
-
-    kwargs = {"serverSelectionTimeoutMS": 10000}
-    if ca_file:
-        kwargs["tlsCAFile"] = ca_file
+        kwargs["tlsAllowInvalidCertificates"] = True
 
     try:
-        mongo_client = motor.motor_asyncio.AsyncIOMotorClient(m_url, tls=True, tlsAllowInvalidCertificates=True, **kwargs)
+        mongo_client = motor.motor_asyncio.AsyncIOMotorClient(m_url, **kwargs)
         db = mongo_client.get_database("anjana_wash")
         client = db
     except Exception as e:
-        logger.error(f"Failed to connect with custom MONGO_URL, falling back to default Atlas URL: {e}")
-        mongo_client = motor.motor_asyncio.AsyncIOMotorClient(DEFAULT_MONGO, tls=True, tlsAllowInvalidCertificates=True, **kwargs)
+        logger.error(f"Failed to connect with custom MONGO_URL: {e}")
+        mongo_client = motor.motor_asyncio.AsyncIOMotorClient(DEFAULT_MONGO, **kwargs)
         db = mongo_client.get_database("anjana_wash")
         client = db
 elif "postgresql" in MONGO_URL or "postgres" in MONGO_URL:
