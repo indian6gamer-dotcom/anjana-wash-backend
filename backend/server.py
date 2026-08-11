@@ -28,21 +28,25 @@ if "<db_password>" in MONGO_URL or "<password>" in MONGO_URL:
 if "mongodb" in MONGO_URL:
     m_url = MONGO_URL
     import motor.motor_asyncio
-    
-    kwargs = {"serverSelectionTimeoutMS": 15000}
     try:
-        import certifi
-        kwargs["tlsCAFile"] = certifi.where()
-    except Exception:
-        kwargs["tlsAllowInvalidCertificates"] = True
-
-    try:
-        mongo_client = motor.motor_asyncio.AsyncIOMotorClient(m_url, **kwargs)
+        mongo_client = motor.motor_asyncio.AsyncIOMotorClient(
+            m_url,
+            tls=True,
+            tlsAllowInvalidCertificates=True,
+            tlsInsecure=True,
+            serverSelectionTimeoutMS=10000
+        )
         db = mongo_client.get_database("anjana_wash")
         client = db
     except Exception as e:
-        logger.error(f"Failed to connect with custom MONGO_URL: {e}")
-        mongo_client = motor.motor_asyncio.AsyncIOMotorClient(DEFAULT_MONGO, **kwargs)
+        logger.error(f"Failed to connect with custom MONGO_URL, falling back to default Atlas URL: {e}")
+        mongo_client = motor.motor_asyncio.AsyncIOMotorClient(
+            DEFAULT_MONGO,
+            tls=True,
+            tlsAllowInvalidCertificates=True,
+            tlsInsecure=True,
+            serverSelectionTimeoutMS=10000
+        )
         db = mongo_client.get_database("anjana_wash")
         client = db
 elif "postgresql" in MONGO_URL or "postgres" in MONGO_URL:
@@ -836,8 +840,9 @@ async def get_booking(booking_id: str):
                         await _payment_callback(booking_id)
                         doc = await db.bookings.find_one({"id": booking_id}, {"_id": 0})
                     elif state in ("FAILED", "EXPIRED", "CANCELLED"):
-                        await db.bookings.delete_one({"id": booking_id})
-                        raise HTTPException(400, "Payment failed or cancelled")
+                        await db.bookings.update_one({"id": booking_id}, {"$set": {"payment_status": "failed", "status": "failed"}})
+                        doc["payment_status"] = "failed"
+                        doc["status"] = "failed"
                 except Exception as e:
                     logger.error(f"Error auto-checking PhonePe status for booking {booking_id}: {str(e)}")
                 
