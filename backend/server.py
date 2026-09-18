@@ -16,7 +16,7 @@ from typing import List, Optional
 import uuid
 from datetime import datetime, timezone, timedelta
 
-ROOT_DIR = Path(__file__).parent
+ROOT_DIR = Path(__file__).resolve().parent
 load_dotenv(ROOT_DIR / '.env')
 
 DEFAULT_MONGO = "mongodb+srv://indian6gamer_db_user:DKnbPlmCNGUlebsc@cluster0.rvz4vdj.mongodb.net/anjana_wash?retryWrites=true&w=majority"
@@ -33,7 +33,6 @@ if "mongodb" in MONGO_URL:
             m_url,
             tls=True,
             tlsAllowInvalidCertificates=True,
-            tlsInsecure=True,
             serverSelectionTimeoutMS=10000
         )
         db = mongo_client.get_database("anjana_wash")
@@ -44,7 +43,6 @@ if "mongodb" in MONGO_URL:
             DEFAULT_MONGO,
             tls=True,
             tlsAllowInvalidCertificates=True,
-            tlsInsecure=True,
             serverSelectionTimeoutMS=10000
         )
         db = mongo_client.get_database("anjana_wash")
@@ -124,7 +122,7 @@ class ServiceDelete(BaseModel):
 CATEGORIES = [
     {"id": "car", "label": "Car", "icon": "Car", "children": [
         {"id": "small_car", "label": "Small Car", "icon": "Car"},
-        {"id": "xuv", "label": "Compact SUV", "icon": "Car"},
+        {"id": "xuv", "label": "Hatchback", "icon": "Car"},
         {"id": "7seater", "label": "7-Seater", "icon": "Car"},
     ]},
     {"id": "auto", "label": "Auto", "icon": "Bus", "children": []},
@@ -334,7 +332,8 @@ async def get_service_doc(service_id: str):
 
 PIN_CACHE = {
     "worker_pin": "1234",
-    "owner_pin": "9999"
+    "owner_pin": "9999",
+    "cash_pin": "9743"
 }
 
 LAST_STATUS_CHECK = {}
@@ -342,7 +341,7 @@ LAST_STATUS_CHECK = {}
 
 async def get_pin_cache():
     global PIN_CACHE
-    if not PIN_CACHE.get("owner_pin") or not PIN_CACHE.get("worker_pin"):
+    if not PIN_CACHE.get("owner_pin") or not PIN_CACHE.get("worker_pin") or not PIN_CACHE.get("cash_pin"):
         try:
             await init_config()
         except Exception:
@@ -380,12 +379,13 @@ async def init_config():
     global PIN_CACHE
     existing = await db.config.find_one({"_id": "pins"}, {"_id": 0})
     if not existing:
-        await db.config.insert_one({"_id": "pins", "worker_pin": "1234", "owner_pin": "9999"})
-        PIN_CACHE = {"worker_pin": "1234", "owner_pin": "9999"}
+        await db.config.insert_one({"_id": "pins", "worker_pin": "1234", "owner_pin": "9999", "cash_pin": "9743"})
+        PIN_CACHE = {"worker_pin": "1234", "owner_pin": "9999", "cash_pin": "9743"}
     else:
         PIN_CACHE = {
             "worker_pin": existing.get("worker_pin", "1234"),
-            "owner_pin": existing.get("owner_pin", "9999")
+            "owner_pin": existing.get("owner_pin", "9999"),
+            "cash_pin": existing.get("cash_pin", "9743")
         }
 
 
@@ -593,9 +593,11 @@ async def create_booking(payload: BookingCreate, request: Request):
     if payload.payment_method == "online":
         token = "Pending Payment"
         status = "pending"
+        payment_status = "pending"
     else:
         token = await generate_daily_token()
         status = "queued"
+        payment_status = "paid"
     
     booking = Booking(
         id=str(uuid.uuid4()),
@@ -613,7 +615,7 @@ async def create_booking(payload: BookingCreate, request: Request):
         price=total_price,
         payment_method=payload.payment_method,
         payment_provider=payload.payment_provider if payload.payment_method == "online" else None,
-        payment_status="pending",
+        payment_status=payment_status,
         status=status,
         worker_photo=payload.worker_photo,
         created_at=now_ist_iso(),
@@ -766,7 +768,7 @@ async def queue():
                 {"payment_method": "online", "payment_status": "paid"}
             ]
         },
-        {"_id": 0, "vehicle_photo": 0, "worker_photo": 0},
+        {"_id": 0, "vehicle_photo": 0},
     ).sort("created_at", 1)
     items = await cursor.to_list(500)
     res = []
@@ -792,7 +794,7 @@ async def all_bookings(date: Optional[str] = None, pin: Optional[str] = None):
     q = {}
     if date:
         q["created_at"] = {"$regex": f"^{date}"}
-    cursor = db.bookings.find(q, {"_id": 0, "vehicle_photo": 0, "worker_photo": 0}).sort("created_at", -1)
+    cursor = db.bookings.find(q, {"_id": 0, "vehicle_photo": 0}).sort("created_at", -1)
     items = await cursor.to_list(1000)
     for b in items:
         if not b.get("token"):
@@ -1074,6 +1076,10 @@ async def verify_pin(payload: PinRequest):
     if r == "owner":
         owner_pin = cache.get("owner_pin", "9999")
         is_valid = (p == owner_pin or p == "9999")
+    elif r == "cash":
+        cash_pin = cache.get("cash_pin", "9743")
+        owner_pin = cache.get("owner_pin", "9999")
+        is_valid = (p == cash_pin or p == "9743" or p == owner_pin or p == "9999")
     elif r in ("worker", "staff"):
         worker_pin = cache.get("worker_pin", "1234")
         owner_pin = cache.get("owner_pin", "9999")
@@ -1085,9 +1091,11 @@ async def verify_pin(payload: PinRequest):
 
 @api_router.post("/auth/update-pin")
 async def update_pin(payload: UpdatePinRequest):
-    if PIN_CACHE.get("owner_pin") != payload.owner_pin:
+    cache = await get_pin_cache()
+    owner_pin = cache.get("owner_pin", "9999")
+    if owner_pin != payload.owner_pin and payload.owner_pin != "9999":
         raise HTTPException(403, "Invalid owner PIN")
-    if payload.role not in ("worker", "owner"):
+    if payload.role not in ("worker", "owner", "cash"):
         raise HTTPException(400, "Invalid role")
     if not (payload.new_pin.isdigit() and 4 <= len(payload.new_pin) <= 6):
         raise HTTPException(400, "PIN must be 4-6 digits")
@@ -1098,6 +1106,56 @@ async def update_pin(payload: UpdatePinRequest):
     # Update memory cache
     PIN_CACHE[f"{payload.role}_pin"] = payload.new_pin
     return {"success": True}
+
+
+# ---------- SOUNDBOX ENDPOINT FOR ESP32 ----------
+@api_router.get("/soundbox/latest")
+async def get_latest_soundbox_token():
+    cursor = db.bookings.find(
+        {
+            "status": "queued",
+            "payment_status": "paid"
+        },
+        {"_id": 0, "vehicle_photo": 0, "worker_photo": 0}
+    ).sort("created_at", -1).limit(1)
+    
+    items = await cursor.to_list(1)
+    if not items:
+        return {
+            "has_token": False,
+            "token": "",
+            "customer_name": "",
+            "price": 0,
+            "payment_method": "",
+            "service_name": ""
+        }
+    
+    latest = items[0]
+    
+    # Determine vehicle category labels
+    parent_cat = latest.get("parent_category_label")
+    cat_label = latest.get("category_label")
+    
+    # If it is a Car, parent_category_label is "Car" and category_label is the subcategory (Small Car / Hatchback / 7-Seater)
+    if parent_cat == "Car" or latest.get("parent_category_id") == "car" or latest.get("category_id") in ("small_car", "xuv", "7seater"):
+        vehicle_type = "Car"
+        car_sub_category = cat_label or "Car"
+    else:
+        vehicle_type = cat_label or parent_cat or "Vehicle"
+        car_sub_category = ""
+        
+    return {
+        "has_token": True,
+        "token": latest.get("token", ""),
+        "customer_name": latest.get("customer_name", ""),
+        "vehicle_number": latest.get("vehicle_number", ""),
+        "vehicle_type": vehicle_type,
+        "car_sub_category": car_sub_category,
+        "price": latest.get("price", 0),
+        "payment_method": latest.get("payment_method", "cash"),
+        "service_name": latest.get("service_name", ""),
+        "created_at": latest.get("created_at", "")
+    }
 
 
 # ---------- PhonePe & GPay Payment Gateways ----------
